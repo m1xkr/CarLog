@@ -2,13 +2,14 @@ import { loadDb, saveDb, loadSettings, saveSettings, alive, upsert, remove, uid,
 import { ceToRecords, ceObjToRecords, importInto } from './ce-import.js';
 import * as S from './stats.js';
 import * as disk from './yadisk.js';
-import { createSync } from './sync.js';
+import { createSync, provider } from './sync.js';
+import * as gd from './gdrive.js';
 import * as EV from './events.js';
 import * as P from './parts.js';
 import { buildReport, REPORT_CSS } from './report.js';
 import { maintain, workFrequency, CATALOG_ORDER, normName } from './catalog.js';
 import { loadSqlJs, isSqlite, ceDbToObj } from './ce-db.js';
-import { YANDEX_CLIENT_ID, YANDEX_PROXY, APP_VERSION } from './config.js';
+import { YANDEX_CLIENT_ID, YANDEX_PROXY, GOOGLE_CLIENT_ID, APP_VERSION } from './config.js';
 
 // ---------------------------------------------------------------- форматирование
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -38,6 +39,7 @@ const app = {
   render: () => render(),
   setSyncState: (state, msg) => { app.syncState = state; app.syncMsg = msg; renderSync(); },
   afterMerge: db => maintain(db, () => uid('wrk')),
+  reauth: () => googleSilentReauth(),
 };
 const sync = createSync(app);
 
@@ -48,6 +50,23 @@ function commit() {
 }
 
 function clientId() { return YANDEX_CLIENT_ID || app.settings.yandexClientId || ''; }
+function googleClientId() { return GOOGLE_CLIENT_ID || app.settings.googleClientId || ''; }
+
+// Тихое продление входа в Google: короткий переход на Google и обратно без вопросов.
+// Не чаще раза в 2 минуты, не во время заполнения формы и не после неудачной попытки.
+function googleSilentReauth() {
+  const s = app.settings;
+  if (s.syncProvider !== 'google' || !s.googleToken || s.googleNeedsLogin || !googleClientId()) return false;
+  if (document.visibilityState !== 'visible' || !$('#sheetBackdrop').hidden || !$('#report').hidden) return false;
+  if (Date.now() - (s.googleReauthAt || 0) < 120000) return false;
+  s.googleReauthAt = Date.now(); saveSettings(s);
+  location.href = gd.authUrl(googleClientId(), { silent: true, hint: s.googleEmail || '' });
+  return true;
+}
+function googleLogin() {
+  if (!googleClientId()) { toast('Не задан Client ID Google'); return; }
+  location.href = gd.authUrl(googleClientId(), { hint: app.settings.googleEmail || '' });
+}
 
 function vehicles() { return alive(app.db.vehicles).sort((a, b) => a.name.localeCompare(b.name, 'ru')); }
 function currentVehicle() {
@@ -98,12 +117,16 @@ function render() {
 function renderSync() {
   const btn = $('#syncBtn'), t = $('#syncText');
   const s = app.settings;
-  const state = !s.yandexToken && app.syncState !== 'error' ? 'off' : app.syncState;
-  btn.dataset.state = state;
+  const p = provider(s);
+  const name = p?.name === 'google' ? 'Google' : 'Яндекс';
+  let state = !p && app.syncState !== 'error' ? 'off' : app.syncState;
+  if (p?.name === 'google' && s.googleNeedsLogin) state = 'reauth';
+  btn.dataset.state = state === 'reauth' ? 'error' : state;
   t.textContent = state === 'busy' ? 'Синхронизация…'
+    : state === 'reauth' ? 'Войти в Google'
     : state === 'error' ? 'Ошибка синхр.'
-    : state === 'ok' ? `Диск · ${new Date(s.lastSync).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}`
-    : s.yandexToken ? 'Яндекс Диск' : 'Без облака';
+    : state === 'ok' ? `${name} · ${new Date(s.lastSync).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}`
+    : p ? `${name} Диск` : 'Без облака';
 }
 
 function welcome() {
@@ -116,9 +139,9 @@ function welcome() {
       <button class="btn primary block" data-act="import">Импорт из Car Expenses</button>
       <p class="note" style="margin:0 4px">Подойдёт резервная копия <b>ce_db_backup_….db</b> (сразу все машины) или экспорт в .csv.</p>
       <button class="btn block" data-act="new-vehicle">Добавить автомобиль вручную</button>
-      ${app.settings.yandexToken ? '' : '<button class="btn soft block" data-act="go-more">Подключить Яндекс Диск</button>'}
+      ${provider(app.settings) ? '' : '<button class="btn soft block" data-act="go-more">Подключить облако для синхронизации</button>'}
     </div>
-    <p class="note">Уже пользуетесь приложением на другом устройстве? Подключите Яндекс Диск во вкладке «Ещё» — данные подтянутся сами.</p>`;
+    <p class="note">Уже пользуетесь приложением на другом устройстве? Подключите то же облако в «⚙» — данные подтянутся сами.</p>`;
 }
 
 function viewOverview() {
@@ -362,27 +385,28 @@ function lineChart(pts, avg) {
 function viewMore() {
   const s = app.settings;
   const v = currentVehicle();
-  const cid = clientId();
-  const connected = !!s.yandexToken;
+  const p = provider(s);
+  const syncAt = s.lastSync ? 'синхр. ' + new Date(s.lastSync).toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : 'ещё не синхронизировано';
   return `
-    <h2 class="section" style="margin-top:8px">Яндекс Диск</h2>
+    <h2 class="section" style="margin-top:8px">Синхронизация</h2>
     <div class="list">
-      ${connected ? `
-        <div class="set-row"><span>Подключён</span><span class="hint">${s.lastSync ? 'синхр. ' + new Date(s.lastSync).toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : 'ещё не синхронизировано'}</span></div>
+      ${p ? `
+        <div class="set-row"><span>${p.name === 'google' ? 'Google Диск' : 'Яндекс Диск'}${p.name === 'google' && s.googleEmail ? `<br><span class="hint">${esc(s.googleEmail)}</span>` : ''}</span><span class="hint">${syncAt}</span></div>
         ${s.lastSyncError ? `<div class="set-row"><span class="hint" style="color:var(--danger)">${esc(s.lastSyncError)}</span></div>` : ''}
+        ${p.name === 'google' && (s.googleNeedsLogin || p.expired) ? '<button class="set-row accent" data-act="g-login">Войти в Google снова</button>' : ''}
         <button class="set-row accent" data-act="sync-now">Синхронизировать сейчас</button>
-        <button class="set-row" data-act="ya-check"><span>Проверить связь с Диском</span><span class="go">›</span></button>
-        <button class="set-row danger" data-act="ya-logout">Отключить Диск</button>`
+        ${p.name === 'yandex' ? '<button class="set-row" data-act="ya-check"><span>Проверить связь с Диском</span><span class="go">›</span></button>' : ''}
+        <button class="set-row danger" data-act="${p.name === 'google' ? 'g-logout' : 'ya-logout'}">Отключить</button>`
       : `
-        ${YANDEX_CLIENT_ID ? '' : `<div class="field"><label for="cid">ClientID</label><input id="cid" placeholder="из oauth.yandex.ru" value="${esc(s.yandexClientId)}" autocomplete="off" autocapitalize="off" spellcheck="false"></div>`}
-        <button class="set-row accent" data-act="ya-login" ${cid || !YANDEX_CLIENT_ID ? '' : 'disabled'}>Войти через Яндекс</button>
-        <button class="set-row" data-act="ya-manual"><span>Войти по коду</span><span class="hint">если вход не вернулся в приложение</span></button>`}
+        ${GOOGLE_CLIENT_ID ? '' : `<div class="field"><label for="gcid">Google Client ID</label><input id="gcid" placeholder="….apps.googleusercontent.com" value="${esc(s.googleClientId || '')}" autocomplete="off" autocapitalize="off" spellcheck="false"></div>`}
+        <button class="set-row accent" data-act="g-connect"><span>Войти через Google</span><span class="hint">Google Диск</span></button>
+        <button class="set-row" data-act="ya-login"><span>Войти через Яндекс</span><span class="hint">может понадобиться прокси</span></button>`}
     </div>
-    ${connected ? `<div class="list" style="margin-top:10px">
+    ${p?.name === 'yandex' ? `<div class="list" style="margin-top:10px">
       <div class="field stack"><label>Прокси (если Диск недоступен из браузера)</label>
         <input id="proxyUrl" value="${esc(s.yandexProxy || '')}" placeholder="${esc(YANDEX_PROXY || 'https://functions.yandexcloud.net/…')}" autocomplete="off" autocapitalize="off" spellcheck="false" style="text-align:left"></div>
       <button class="set-row accent" data-act="proxy-save">Сохранить прокси</button></div>` : ''}
-    <p class="note">Данные хранятся в одном файле в папке «Приложения» на вашем Диске. Приложение видит только её. Синхронизация идёт при запуске и после каждой записи.</p>
+    <p class="note">Данные хранятся в одном файле в скрытой папке приложения на вашем ${p?.name === 'yandex' ? 'Яндекс' : 'Google'} Диске — приложение видит только её. Синхронизация идёт при запуске и после каждой записи.${p?.name === 'google' ? ' Google выдаёт вход на час, дальше приложение продлевает его само коротким переходом на Google.' : ''}</p>
 
     <h2 class="section">Данные</h2>
     <div class="list">
@@ -401,7 +425,7 @@ function viewMore() {
 
     <h2 class="section">Установка на iPhone</h2>
     <div class="card pad" style="font-size:14px;color:var(--muted)">Откройте эту страницу в Safari → кнопка «Поделиться» → «На экран „Домой“». Приложение появится иконкой и будет работать без интернета.</div>
-    <p class="note">Бортжурнал ${APP_VERSION} · записи хранятся на устройстве${connected ? ' и на Яндекс Диске' : ''}.</p>
+    <p class="note">Бортжурнал ${APP_VERSION} · записи хранятся на устройстве${p ? (p.name === 'google' ? ' и на Google Диске' : ' и на Яндекс Диске') : ''}.</p>
     <input type="file" id="fileInput" hidden>`;
 }
 
@@ -1318,7 +1342,9 @@ document.addEventListener('click', async e => {
 
   if (t.closest('#vehicleBtn')) { if (vehicles().length > 1) vehicleSheet(); return; }
   if (t.closest('#syncBtn')) {
-    if (!app.settings.yandexToken) { app.tab = 'more'; render(); return; }
+    const pv = provider(app.settings);
+    if (!pv) { app.tab = 'more'; render(); return; }
+    if (pv.name === 'google' && (app.settings.googleNeedsLogin || pv.expired)) { app.settings.googleNeedsLogin = false; saveSettings(app.settings); googleLogin(); return; }
     await sync.run();
     if (app.syncState === 'error') toast(app.syncMsg || 'Ошибка синхронизации');
     else toast('Синхронизировано');
@@ -1361,10 +1387,27 @@ document.addEventListener('click', async e => {
       if (name) { upsert(app.db, 'vehicles', { ...v, name }); commit(); }
       break;
     }
+    case 'g-connect': {
+      const input = $('#gcid');
+      if (input) { app.settings.googleClientId = input.value.trim(); saveSettings(app.settings); }
+      app.settings.googleNeedsLogin = false; saveSettings(app.settings);
+      googleLogin();
+      break;
+    }
+    case 'g-login': app.settings.googleNeedsLogin = false; saveSettings(app.settings); googleLogin(); break;
+    case 'g-logout':
+      if (confirm('Отключить Google Диск? Данные на устройстве и в облаке останутся.')) {
+        const tok = app.settings.googleToken;
+        if (tok) fetch('https://oauth2.googleapis.com/revoke?token=' + encodeURIComponent(tok), { method: 'POST' }).catch(() => {});
+        Object.assign(app.settings, { googleToken: null, googleExpires: 0, syncProvider: null, lastSync: null, lastSyncError: null, googleNeedsLogin: false });
+        saveSettings(app.settings); app.syncState = 'off'; render();
+      }
+      break;
     case 'ya-login': {
       const input = $('#cid');
       if (input) { app.settings.yandexClientId = input.value.trim(); saveSettings(app.settings); }
       if (!clientId()) { toast('Введите ClientID приложения из oauth.yandex.ru'); return; }
+      app.settings.syncProvider = 'yandex'; saveSettings(app.settings);
       location.href = disk.authUrl(clientId());
       break;
     }
@@ -1392,7 +1435,7 @@ document.addEventListener('click', async e => {
     }
     case 'ya-logout':
       if (confirm('Отключить Яндекс Диск? Данные на устройстве и на Диске останутся.')) {
-        app.settings.yandexToken = null; app.settings.lastSync = null; app.settings.lastSyncError = null;
+        app.settings.yandexToken = null; app.settings.lastSync = null; app.settings.lastSyncError = null; app.settings.syncProvider = null;
         saveSettings(app.settings); app.syncState = 'off'; render();
       }
       break;
@@ -1449,6 +1492,7 @@ function ensureDefaults() {
 }
 
 async function connectToken(token, expires) {
+  app.settings.syncProvider = 'yandex';
   app.settings.yandexToken = token;
   app.settings.yandexTokenExpires = expires;
   saveSettings(app.settings);
@@ -1459,12 +1503,24 @@ async function connectToken(token, expires) {
 
 // ---------------------------------------------------------------- запуск
 if (disk.setProxy) disk.setProxy(app.settings.yandexProxy || YANDEX_PROXY);
-const fromYa = disk.takeTokenFromHash();
+const fromG = gd.takeResultFromHash();
+const fromYa = fromG ? null : disk.takeTokenFromHash();
 try { if (maintain(app.db, () => uid('wrk'))) saveDb(app.db); }
 catch (e) { console.error(e); setTimeout(() => toast('Не удалось обновить справочник работ: ' + e.message), 500); }
 render();
 window.__carlogReady = true;
-if (fromYa) connectToken(fromYa.token, fromYa.expires);
+if (fromG?.token) {
+  const first = app.settings.syncProvider !== 'google' || !app.settings.googleToken;
+  Object.assign(app.settings, { syncProvider: 'google', googleToken: fromG.token, googleExpires: fromG.expires, googleNeedsLogin: false });
+  saveSettings(app.settings);
+  render();
+  if (!app.settings.googleEmail || first) gd.whoAmI(fromG.token).then(email => { if (email) { app.settings.googleEmail = email; saveSettings(app.settings); render(); } });
+  sync.run().then(() => { if (first) toast(app.syncState === 'error' ? (app.syncMsg || 'Ошибка синхронизации') : 'Google Диск подключён'); });
+} else if (fromG?.error) {
+  if (app.settings.googleToken) { app.settings.googleNeedsLogin = true; saveSettings(app.settings); }
+  render();
+  toast(fromG.error === 'access_denied' ? 'Доступ к Google Диску не выдан' : 'Войдите в Google ещё раз: «⚙» → «Войти в Google снова»');
+} else if (fromYa) connectToken(fromYa.token, fromYa.expires);
 else sync.run();
 
 if ('serviceWorker' in navigator && location.protocol === 'https:') {
