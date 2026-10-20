@@ -37,7 +37,7 @@
    права `…/auth/drive.appdata` и `email` (оба не требуют проверки Google), затем **Publish app**.
 3. «Clients» → «Create client» → **Web application**: Authorized JavaScript origins `https://m1xkr.github.io`,
    Authorized redirect URIs `https://m1xkr.github.io/CarLog/`.
-4. Client ID вписать в `GOOGLE_CLIENT_ID` в `js/config.js` (или ввести в приложении: «⚙» → «Синхронизация»).
+4. Client ID прописан в `GOOGLE_CLIENT_ID` в `js/config.js`.
 
 Google выдаёт браузерным приложениям вход на час; приложение продлевает его само коротким переходом
 на Google без вопросов (`prompt=none`), не чаще раза в 2 минуты и не во время заполнения формы.
