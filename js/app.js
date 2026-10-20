@@ -412,6 +412,7 @@ function viewMore() {
     <div class="list">
       <button class="set-row accent" data-act="import"><span>Импорт файла</span><span class="hint">Car Expenses (.db, .csv) или копия</span></button>
       <button class="set-row" data-act="export-json"><span>Сохранить резервную копию</span><span class="go">›</span></button>
+      <button class="set-row" data-act="restore"><span>Загрузить из резервной копии</span><span class="go">›</span></button>
       <button class="set-row" data-act="export-csv"><span>Выгрузить таблицу (CSV)</span><span class="go">›</span></button>
       <button class="set-row accent" data-act="report"><span>Отчёт по обслуживанию для продажи</span><span class="go">›</span></button>
     </div>
@@ -1260,16 +1261,61 @@ async function importFile(file) {
     return;
   }
   if (text.trimStart().startsWith('{')) {
-    const incoming = normalize(JSON.parse(text));
-    const n = Object.values(incoming.refuels).length + Object.values(incoming.expenses).length;
-    if (!confirm(`Резервная копия: ${n} записей. Объединить с текущими данными?`)) return;
-    app.db = mergeDb(app.db, incoming);
-    maintain(app.db, () => uid('wrk'));
-    commit();
-    toast('Копия восстановлена');
-    return;
+    let raw;
+    try { raw = JSON.parse(text); } catch { toast('Файл повреждён: не удалось прочитать копию'); return; }
+    if (!raw || !raw.vehicles || !raw.refuels) { toast('Это не резервная копия Бортжурнала'); return; }
+    return restoreSheet(raw);
   }
   return importCe(ceToRecords(text));
+}
+
+// Восстановление из резервной копии Бортжурнала (JSON): объединить или заменить текущие данные.
+function restoreSheet(raw) {
+  const incoming = normalize(raw);
+  const cars = alive(incoming.vehicles);
+  const count = c => alive(incoming[c]).length;
+  const saved = raw.savedAt ? new Date(raw.savedAt).toLocaleString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : 'дата неизвестна';
+  const sheet = openSheet('Восстановление', `
+    <div class="card pad">
+      <div style="font-size:17px;font-weight:600">Резервная копия от ${esc(saved)}</div>
+      <div class="note" style="margin:8px 0 0">${cars.length ? esc(cars.map(v => v.name).join(', ')) : 'без машин'}</div>
+      <div class="left num" style="margin-top:10px">
+        <span class="due">заправок ${count('refuels')}</span><span class="due">расходов ${count('expenses')}</span>
+        <span class="due">работ ${count('works')}</span><span class="due">запчастей ${count('parts')}</span>
+      </div>
+    </div>
+    <div class="form-gap"></div>
+    <button class="btn primary block" data-rs="merge">Объединить с текущими данными</button>
+    <p class="form-hint">Записи из копии добавятся к тем, что уже есть. Если одна и та же запись есть и там, и тут, останется более свежая правка.</p>
+    <div class="form-gap"></div>
+    <button class="btn danger block" data-rs="replace">Заменить текущие данные копией</button>
+    <p class="form-hint">Всё станет ровно как в копии: записи, которых в копии нет, удалятся — на этом устройстве и, при синхронизации, в облаке.</p>`);
+  sheet.addEventListener('click', e => {
+    const mode = e.target.closest('[data-rs]')?.dataset.rs;
+    if (!mode) return;
+    if (mode === 'merge') {
+      app.db = mergeDb(app.db, incoming);
+    } else {
+      if (!confirm('Заменить все текущие данные копией? Записи, которых нет в копии, будут удалены.')) return;
+      const t = Date.now();
+      const next = normalize(JSON.parse(JSON.stringify(incoming)));
+      // свежая метка времени, чтобы замена победила при слиянии с облаком; лишние записи — удалённые
+      for (const c of Object.keys(next)) {
+        if (c === 'version') continue;
+        for (const id of Object.keys(next[c])) next[c][id] = { ...next[c][id], updatedAt: t };
+        for (const id of Object.keys(app.db[c] || {})) if (!next[c][id]) next[c][id] = { id, deleted: true, updatedAt: t };
+      }
+      app.db = next;
+    }
+    maintain(app.db, () => uid('wrk'));
+    if (!app.db.vehicles[app.settings.vehicleId] || app.db.vehicles[app.settings.vehicleId].deleted) {
+      app.settings.vehicleId = alive(app.db.vehicles)[0]?.id || null; saveSettings(app.settings);
+    }
+    closeSheet();
+    app.tab = 'overview';
+    commit();
+    toast(mode === 'merge' ? 'Копия объединена с данными' : 'Данные заменены копией');
+  });
 }
 
 function importCe(recs) {
@@ -1369,6 +1415,9 @@ document.addEventListener('click', async e => {
       $('#fileInput').click();
       break;
     }
+    case 'restore':
+      $('#fileInput').click();
+      break;
     case 'export-json':
       shareOrDownload(`carlog_backup_${today()}.json`, JSON.stringify({ ...app.db, savedAt: new Date().toISOString() }), 'application/json');
       break;

@@ -9,4 +9,4 @@ export const GOOGLE_CLIENT_ID = '531833364393-v33uim5ekniudi0lccnlgqksgr295nsu.a
 // не разрешает запросы со страниц (ошибка CORS). Можно задать и в приложении: «⚙» → «Яндекс Диск».
 export const YANDEX_PROXY = '';
 
-export const APP_VERSION = '1.4.2';
+export const APP_VERSION = '1.4.3';
