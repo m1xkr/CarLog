@@ -23,7 +23,7 @@
 1. На https://oauth.yandex.ru создать приложение: платформа «Веб-сервисы», Redirect URI
    `https://m1xkr.github.io/CarLog/` (и запасной `https://oauth.yandex.ru/verification_code`),
    доступ «Яндекс Диск REST API → Доступ к папке приложения на Диске».
-2. ClientID вписать в `js/config.js` (или ввести в приложении: «Ещё» → «Яндекс Диск»).
+2. ClientID прописан в `js/config.js` — пользователям вводить ничего не нужно.
 
 ## Устройство
 
