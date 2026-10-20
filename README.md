@@ -3,7 +3,7 @@
 Учёт заправок и расходов на автомобиль: веб-приложение (PWA) для iPhone и любого браузера.
 Работает без интернета, данные синхронизируются через Яндекс Диск.
 
-**Адрес:** https://m1xkr.github.io/carlog/
+**Адрес:** https://m1xkr.github.io/CarLog/
 
 ## Возможности
 
@@ -21,7 +21,7 @@
 ## Яндекс Диск
 
 1. На https://oauth.yandex.ru создать приложение: платформа «Веб-сервисы», Redirect URI
-   `https://m1xkr.github.io/carlog/` (и запасной `https://oauth.yandex.ru/verification_code`),
+   `https://m1xkr.github.io/CarLog/` (и запасной `https://oauth.yandex.ru/verification_code`),
    доступ «Яндекс Диск REST API → Доступ к папке приложения на Диске».
 2. ClientID вписать в `js/config.js` (или ввести в приложении: «Ещё» → «Яндекс Диск»).
 
