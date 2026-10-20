@@ -1,5 +1,7 @@
-// Импорт текстового бэкапа Car Expenses (CE v.30.x): разделы "### ... info", таблицы через табуляцию.
-// Записям даются стабильные id, поэтому повторный импорт того же файла не создаёт дублей.
+// Импорт из Car Expenses: текстового экспорта (CE v.30.x, разделы "### ... info" через табуляцию)
+// и базы резервной копии (.db, см. ce-db.js) — оба приводятся к одной структуре и разбираются здесь.
+// Записям даются стабильные id, поэтому повторный импорт не создаёт дублей.
+import { normName } from './catalog.js';
 
 const PALETTE = ['#e5484d', '#f76b15', '#ffc53d', '#46a758', '#12a594', '#0090ff', '#3e63dd', '#8e4ec6',
   '#d6409f', '#978365', '#ad7f58', '#6f6e77', '#29a383', '#5b5bd6', '#e54666', '#a18072', '#2b9a66'];
@@ -43,14 +45,19 @@ export function parseCeText(text) {
 
 // Возвращает набор записей в формате приложения (без updatedAt — его ставит importInto).
 export function ceToRecords(text) {
-  const ce = parseCeText(text);
+  return ceObjToRecords(parseCeText(text));
+}
+
+export function ceObjToRecords(ce) {
   const out = { vehicles: [], fuelTypes: [], categories: [], works: [], refuels: [], expenses: [] };
 
   const vehIdByName = {};
   for (const v of ce.vehicles) {
     const id = `ce-v-${v.name}`;
     vehIdByName[v.name] = id;
-    out.vehicles.push({ id, name: v.name, comment: v.comment || '', tankVolume: num(v.tank_volume) || null });
+    out.vehicles.push({ id, name: v.name, comment: v.comment || '', tankVolume: num(v.tank_volume) || null,
+      make: v.veh_manufacturer || '', model: v.veh_model || '', vin: (v.veh_vin || '').toUpperCase(),
+      year: v.veh_birthday && v.veh_birthday !== '0' ? String(v.veh_birthday).slice(0, 4) : '' });
   }
   const fuelName = {};
   for (const f of ce.fuelTypes) {
@@ -82,7 +89,7 @@ export function ceToRecords(text) {
       everyMonths: (type === '2' || type === '3') && months ? months : null,
       onceKm: type === '4' ? Math.round(num(p.period_mileage_once)) || null : null,
       onceDate: type === '5' ? onceDate : null,
-      remind: p.event_show === '1',
+      remind: p.event_show === '1' && ((type === '1' || type === '3') && km > 0 || (type === '2' || type === '3') && months > 0 || type === '4' || type === '5'),
     });
   }
 
@@ -138,17 +145,50 @@ export function ceToRecords(text) {
 
 // Добавляет в базу записи, которых ещё нет. Удалённые пользователем не воскресают.
 // Записи, импортированные прежней версией и ни разу не правленные (updatedAt < IMPORT_STAMP),
-// обновляются — так к старым данным добавляются новые поля (например, виды работ).
-// Метка остаётся маленьким числом, чтобы любая ручная правка была «новее» импорта.
-export const IMPORT_STAMP = 2;
+// обновляются — так к старым данным добавляются новые поля.
+// Виды работ сопоставляются по названию: если такой уже есть (из справочника или прошлого импорта),
+// используется он, а интервалы из Car Expenses переносятся в него, пока пользователь его не правил.
+export const IMPORT_STAMP = 3;
 export function importInto(db, recs) {
   const added = {}, updated = {};
-  for (const [coll, list] of Object.entries(recs)) {
-    added[coll] = 0; updated[coll] = 0;
-    for (const r of list) {
+  for (const k of Object.keys(recs)) { added[k] = 0; updated[k] = 0; }
+
+  const alias = {};
+  const scheduled = w => !!(w.everyKm || w.everyMonths || w.onceKm || w.onceDate);
+  // одинаковые названия внутри импорта: оставляем вариант с интервалом
+  const byName = new Map();
+  for (const w of recs.works || []) {
+    const n = normName(w.name);
+    const prev = byName.get(n);
+    if (!prev) byName.set(n, w);
+    else if (!scheduled(prev) && scheduled(w)) { alias[prev.id] = w.id; byName.set(n, w); }
+    else alias[w.id] = prev.id;
+  }
+  const works = [...byName.values()];
+  for (const w of works) {
+    if (db.works[w.id]) continue;
+    const existing = Object.values(db.works).find(x => !x.deleted && x.id !== w.id && normName(x.name) === normName(w.name));
+    if (!existing) continue;
+    alias[w.id] = existing.id;
+    for (const [from, to] of Object.entries(alias)) if (to === w.id) alias[from] = existing.id;
+    if ((existing.updatedAt || 0) < IMPORT_STAMP) {
+      db.works[existing.id] = { ...existing, categoryId: w.categoryId || existing.categoryId, everyKm: w.everyKm, everyMonths: w.everyMonths,
+        onceKm: w.onceKm, onceDate: w.onceDate, remind: w.remind, updatedAt: IMPORT_STAMP };
+      updated.works++;
+    }
+  }
+  const mapWork = id => alias[id] || id;
+  const list = {
+    ...recs,
+    works: works.filter(w => !alias[w.id]),
+    expenses: (recs.expenses || []).map(e => ({ ...e, workIds: [...new Set((e.workIds || []).map(mapWork))] })),
+  };
+
+  for (const [coll, items] of Object.entries(list)) {
+    for (const r of items) {
       const cur = db[coll][r.id];
       if (!cur) { db[coll][r.id] = { ...r, updatedAt: IMPORT_STAMP }; added[coll]++; }
-      else if (!cur.deleted && (cur.updatedAt || 0) < IMPORT_STAMP) { db[coll][r.id] = { ...r, updatedAt: IMPORT_STAMP }; updated[coll]++; }
+      else if (!cur.deleted && (cur.updatedAt || 0) < IMPORT_STAMP) { db[coll][r.id] = { ...cur, ...r, updatedAt: IMPORT_STAMP }; updated[coll]++; }
     }
   }
   return { added, updated };

@@ -1,5 +1,5 @@
 // Синхронизация: скачать облачную копию, слить с локальной, при расхождении — загрузить обратно.
-import { mergeDb, normalize, fingerprint, saveDb, saveSettings } from './store.js';
+import { mergeDb, normalize, fingerprint, saveDb, saveSettings, emptyDb } from './store.js';
 import * as disk from './yadisk.js';
 
 export function createSync(app) {
@@ -14,7 +14,8 @@ export function createSync(app) {
       try {
         const remoteRaw = await disk.download(s.yandexToken);
         const remote = remoteRaw ? normalize(remoteRaw) : null;
-        const merged = remote ? mergeDb(app.db, remote) : app.db;
+        const merged = mergeDb(app.db, remote || emptyDb());
+        if (app.afterMerge) app.afterMerge(merged);
         const localChanged = fingerprint(merged) !== fingerprint(app.db);
         if (localChanged) { app.db = merged; saveDb(merged); app.render(); }
         if (!remote || fingerprint(remote) !== fingerprint(merged)) {

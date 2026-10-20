@@ -1,11 +1,13 @@
 import { loadDb, saveDb, loadSettings, saveSettings, alive, upsert, remove, uid, mergeDb, normalize } from './store.js';
-import { ceToRecords, importInto } from './ce-import.js';
+import { ceToRecords, ceObjToRecords, importInto } from './ce-import.js';
 import * as S from './stats.js';
 import * as disk from './yadisk.js';
 import { createSync } from './sync.js';
 import * as EV from './events.js';
 import * as P from './parts.js';
 import { buildReport, REPORT_CSS } from './report.js';
+import { maintain, workFrequency, CATALOG_ORDER, normName } from './catalog.js';
+import { loadSqlJs, isSqlite, ceDbToObj } from './ce-db.js';
 import { YANDEX_CLIENT_ID, APP_VERSION } from './config.js';
 
 // ---------------------------------------------------------------- форматирование
@@ -35,6 +37,7 @@ const app = {
   syncState: 'off',
   render: () => render(),
   setSyncState: (state, msg) => { app.syncState = state; app.syncMsg = msg; renderSync(); },
+  afterMerge: db => maintain(db, () => uid('wrk')),
 };
 const sync = createSync(app);
 
@@ -111,6 +114,7 @@ function welcome() {
     </div>
     <div class="picker" style="margin-top:12px">
       <button class="btn primary block" data-act="import">Импорт из Car Expenses</button>
+      <p class="note" style="margin:0 4px">Подойдёт резервная копия <b>ce_db_backup_….db</b> (сразу все машины) или экспорт в .csv.</p>
       <button class="btn block" data-act="new-vehicle">Добавить автомобиль вручную</button>
       ${app.settings.yandexToken ? '' : '<button class="btn soft block" data-act="go-more">Подключить Яндекс Диск</button>'}
     </div>
@@ -377,7 +381,7 @@ function viewMore() {
 
     <h2 class="section">Данные</h2>
     <div class="list">
-      <button class="set-row accent" data-act="import"><span>Импорт файла</span><span class="hint">Car Expenses или резервная копия</span></button>
+      <button class="set-row accent" data-act="import"><span>Импорт файла</span><span class="hint">Car Expenses (.db, .csv) или копия</span></button>
       <button class="set-row" data-act="export-json"><span>Сохранить резервную копию</span><span class="go">›</span></button>
       <button class="set-row" data-act="export-csv"><span>Выгрузить таблицу (CSV)</span><span class="go">›</span></button>
       <button class="set-row accent" data-act="report"><span>Отчёт по обслуживанию для продажи</span><span class="go">›</span></button>
@@ -393,7 +397,7 @@ function viewMore() {
     <h2 class="section">Установка на iPhone</h2>
     <div class="card pad" style="font-size:14px;color:var(--muted)">Откройте эту страницу в Safari → кнопка «Поделиться» → «На экран „Домой“». Приложение появится иконкой и будет работать без интернета.</div>
     <p class="note">Бортжурнал ${APP_VERSION} · записи хранятся на устройстве${connected ? ' и на Яндекс Диске' : ''}.</p>
-    <input type="file" id="fileInput" accept=".csv,.json,.txt,text/plain,text/csv,application/json" hidden>`;
+    <input type="file" id="fileInput" hidden>`;
 }
 
 // ---------------------------------------------------------------- нижний лист с формой
@@ -548,9 +552,14 @@ function expenseForm(rec = null, preset = {}) {
   const hasSplit = !!(e.parts && e.work);
   const sheet = openSheet(rec ? 'Расход' : 'Новый расход', `
     <div class="form">
-      <div class="field stack"><label>Виды работ — по ним продлеваются события ТО</label>
+      <div class="field stack"><label>Работы — по ним продлеваются события ТО</label>
         <div class="wchips" id="e-works"></div>
-        <select id="e-addwork" class="addwork"></select>
+        <div class="wsuggest" id="e-suggest"></div>
+        <button type="button" class="wmore" id="e-allbtn">Все работы…</button>
+        <div class="wall" id="e-all" hidden>
+          <input class="search" id="e-wsearch" type="search" placeholder="Найти работу" autocomplete="off">
+          <div id="e-wlist"></div>
+        </div>
       </div>
       <div class="field stack"><label>Описание</label><input id="e-title" list="e-titles" value="${esc(e.title)}" placeholder="Замена масла, мойка, страховка…" style="text-align:left"></div>
       <datalist id="e-titles">${titles.map(t => `<option value="${esc(t)}">`).join('')}</datalist>
@@ -601,36 +610,70 @@ function expenseForm(rec = null, preset = {}) {
   handleNewOption(sheet.querySelector('#e-cat'), 'categories', 'Название категории', { color: '#8e4ec6', income: false });
   sheet.querySelector('#e-cat').addEventListener('change', () => { catTouched = true; });
 
-  const chipsEl = sheet.querySelector('#e-works'), addEl = sheet.querySelector('#e-addwork');
-  const renderWorks = () => {
-    chipsEl.innerHTML = selected.length ? selected.map(id => `<span class="wchip">${esc(app.db.works[id]?.name || '?')}<button type="button" data-rmwork="${esc(id)}" aria-label="Убрать">✕</button></span>`).join('')
-      : '<span class="hint" style="color:var(--muted);font-size:14px">не выбрано</span>';
-    const all = alive(app.db.works).filter(w => !selected.includes(w.id)).sort((a, b) => (b.remind - a.remind) || a.name.localeCompare(b.name, 'ru'));
-    addEl.innerHTML = '<option value="">＋ Добавить вид работ</option>'
-      + all.map(w => `<option value="${esc(w.id)}">${esc(w.name)}${w.remind && workLabel(w) ? ` · ${esc(workLabel(w))}` : ''}</option>`).join('')
-      + '<option value="__new">＋ Новый вид работ…</option>';
+  const chipsEl = sheet.querySelector('#e-works'), sugEl = sheet.querySelector('#e-suggest');
+  const allEl = sheet.querySelector('#e-all'), listEl = sheet.querySelector('#e-wlist'), searchEl = sheet.querySelector('#e-wsearch');
+  const freq = workFrequency(expenses);
+  const allWorks = () => alive(app.db.works);
+  // частые работы этой машины, дополненные популярными из справочника
+  const suggestions = () => {
+    const byFreq = allWorks().filter(w => freq.has(w.id))
+      .sort((a, b) => freq.get(b.id).count - freq.get(a.id).count || freq.get(b.id).last.localeCompare(freq.get(a.id).last));
+    const extra = CATALOG_ORDER.map(id => app.db.works[id]).filter(w => w && !w.deleted && !freq.has(w.id) && w.remind);
+    return [...byFreq, ...extra].filter(w => !selected.includes(w.id)).slice(0, 12);
   };
-  renderWorks();
-  chipsEl.addEventListener('click', ev => {
-    const id = ev.target.closest('[data-rmwork]')?.dataset.rmwork;
-    if (id) { selected.splice(selected.indexOf(id), 1); renderWorks(); }
-  });
-  addEl.addEventListener('change', () => {
-    let id = addEl.value;
-    if (!id) return;
-    if (id === '__new') {
-      const name = (prompt('Название вида работ, например «Замена масла в АКПП»') || '').trim();
-      if (!name) { addEl.value = ''; return; }
-      const cat = sheet.querySelector('#e-cat').value;
-      id = upsert(app.db, 'works', { id: uid('wrk'), name, categoryId: cat === '__new' ? null : cat, remind: false }).id;
-      saveDb(app.db);
-    }
+  const pick = id => {
+    if (selected.includes(id)) { selected.splice(selected.indexOf(id), 1); renderWorks(); return; }
     selected.push(id);
     const w = app.db.works[id];
     const titleEl = sheet.querySelector('#e-title');
     if (!titleEl.value.trim() && selected.length === 1) titleEl.value = w.name;
-    if (!catTouched && w.categoryId) sheet.querySelector('#e-cat').value = w.categoryId;
+    if (!catTouched && w.categoryId && selected.length === 1) sheet.querySelector('#e-cat').value = w.categoryId;
     renderWorks();
+  };
+  const renderList = () => {
+    const q = normName(searchEl.value);
+    const items = allWorks().filter(w => !q || normName(w.name).includes(q));
+    const groups = new Map();
+    for (const w of items) {
+      const k = w.categoryId || '_none';
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(w);
+    }
+    const exact = items.some(w => normName(w.name) === q);
+    listEl.innerHTML = sortGroups(groups, freq)
+      .map(([cid, ws]) => `<div class="wgroup">${esc(app.db.categories[cid]?.name || 'Без категории')}</div>`
+        + ws.sort((a, b) => (freq.get(b.id)?.count || 0) - (freq.get(a.id)?.count || 0) || a.name.localeCompare(b.name, 'ru'))
+          .map(w => `<button type="button" class="wopt ${selected.includes(w.id) ? 'on' : ''}" data-wpick="${esc(w.id)}">
+            <span>${esc(w.name)}</span><span class="wmeta">${freq.get(w.id) ? `×${freq.get(w.id).count}` : ''}${w.remind && workLabel(w) ? ` · ${esc(workLabel(w))}` : ''}</span></button>`).join('')).join('')
+      + (q && !exact ? `<button type="button" class="wopt add" data-wnew="1">＋ Новая работа «${esc(searchEl.value.trim())}»</button>` : '')
+      + (!items.length && !q ? '<div class="hint">Список пуст</div>' : '');
+  };
+  const renderWorks = () => {
+    chipsEl.innerHTML = selected.map(id => `<span class="wchip">${esc(app.db.works[id]?.name || '?')}<button type="button" data-rmwork="${esc(id)}" aria-label="Убрать">✕</button></span>`).join('');
+    chipsEl.hidden = !selected.length;
+    sugEl.innerHTML = suggestions().map(w => `<button type="button" class="wsug" data-wpick="${esc(w.id)}">＋ ${esc(w.name)}</button>`).join('');
+    if (!allEl.hidden) renderList();
+  };
+  renderWorks();
+  sheet.querySelector('#e-allbtn').addEventListener('click', () => {
+    allEl.hidden = !allEl.hidden;
+    sheet.querySelector('#e-allbtn').textContent = allEl.hidden ? 'Все работы…' : 'Свернуть список';
+    if (!allEl.hidden) { renderList(); }
+  });
+  searchEl.addEventListener('input', renderList);
+  sheet.querySelector('.form').addEventListener('click', ev => {
+    const rm = ev.target.closest('[data-rmwork]')?.dataset.rmwork;
+    if (rm) { selected.splice(selected.indexOf(rm), 1); renderWorks(); return; }
+    const id = ev.target.closest('[data-wpick]')?.dataset.wpick;
+    if (id) { pick(id); return; }
+    if (ev.target.closest('[data-wnew]')) {
+      const name = searchEl.value.trim();
+      const cat = sheet.querySelector('#e-cat').value;
+      const w = upsert(app.db, 'works', { id: uid('wrk'), name, categoryId: cat === '__new' ? null : cat, everyKm: null, everyMonths: null, remind: false });
+      saveDb(app.db);
+      searchEl.value = '';
+      pick(w.id);
+    }
   });
 
   const recalc = () => {
@@ -715,7 +758,8 @@ function viewEvents() {
   const { v, events, rate } = eventsData();
   if (!v) return welcome();
   if (app.eventsSeg === 'parts') return segControl() + viewParts();
-  const active = events.filter(e => e.status !== 'done');
+  const active = events.filter(e => e.status !== 'done' && e.status !== 'unknown');
+  const fresh = events.filter(e => e.status === 'unknown');
   const done = events.filter(e => e.status === 'done');
   const n = st => events.filter(e => e.status === st).length;
   return `${segControl()}
@@ -729,6 +773,9 @@ function viewEvents() {
     </div>
     ${active.length ? `<h2 class="section">Плановое обслуживание</h2><div class="list">${active.map(eventRow).join('')}</div>`
       : `<div class="empty">Событий пока нет.<br>Добавьте интервал, например «Замена масла — каждые 7 500 км или 1 год».</div>`}
+    ${fresh.length ? `<h2 class="section">Ещё не отмечались</h2><div class="list">${fresh.map(eventRow).join('')}</div>
+      <p class="note">Отметьте последнее выполнение — и срок посчитается от него.</p>` : ''}
+    <button class="btn block" style="margin-top:14px" data-act="works-manager">Настроить список работ и интервалы</button>
     ${done.length ? `<h2 class="section">Разовые, выполнены</h2><div class="list">${done.map(eventRow).join('')}</div>` : ''}
     <p class="note">Срок считается от последнего расхода с этим видом работ. Добавили расход — событие продлилось само.
       ${rate ? `Оценки «≈» — по среднему пробегу ${nf(rate)} км в день за последний год.` : ''}</p>`;
@@ -774,7 +821,7 @@ function eventSheet(workId) {
 function workForm(w = null, { pickExisting = false } = {}) {
   const x = w || { name: '', categoryId: alive(app.db.categories).find(c => /основн|обслуж/i.test(c.name))?.id, everyKm: null, everyMonths: null, onceKm: null, onceDate: null, remind: true };
   const candidates = alive(app.db.works).filter(k => !k.remind || !EV.hasSchedule(k)).sort((a, b) => a.name.localeCompare(b.name, 'ru'));
-  const sheet = openSheet(w ? 'Событие' : 'Новое событие', `
+  const sheet = openSheet(w ? 'Работа и интервал' : 'Новое событие', `
     ${pickExisting && candidates.length ? `<div class="form">${field('Вид работ', `<select id="w-pick"><option value="">— новый —</option>${candidates.map(k => `<option value="${esc(k.id)}">${esc(k.name)}</option>`).join('')}</select>`)}</div>
       <p class="form-hint">Выберите вид работ из истории, чтобы срок посчитался от последнего выполнения, или создайте новый.</p><div class="form-gap"></div>` : ''}
     <div class="form">
@@ -809,7 +856,7 @@ function workForm(w = null, { pickExisting = false } = {}) {
       if (remind && !everyKm && !everyMonths && !onceKm && !onceDate) { toast('Задайте интервал по пробегу, времени или разовый срок'); return false; }
       const cat = sheet.querySelector('#w-cat').value;
       upsert(app.db, 'works', {
-        ...(base || {}), id: base?.id || uid('wrk'), name,
+        ...(base || {}), id: (base?.id && app.db.works[base.id] ? base.id : null) || uid('wrk'), name,
         categoryId: cat === '__new' ? null : cat,
         everyKm: everyKm ? Math.round(everyKm) : null, everyMonths: everyMonths || null,
         onceKm: onceKm ? Math.round(onceKm) : null, onceDate, remind,
@@ -1087,6 +1134,58 @@ function showReport(opts) {
   };
 }
 
+// Группы категорий: сначала те, где больше выполненных работ; доходы и топливо — в конце.
+function sortGroups(groups, freq) {
+  const weight = ([cid, ws]) => {
+    const c = app.db.categories[cid];
+    if (c?.income || /топлив/i.test(c?.name || '')) return -1;
+    return ws.reduce((s, w) => s + (freq.get(w.id)?.count || 0), 0) + ws.filter(w => w.remind && EV.hasSchedule(w)).length * 1000;
+  };
+  return [...groups.entries()].sort((a, b) => weight(b) - weight(a) || (app.db.categories[a[0]]?.name || 'я').localeCompare(app.db.categories[b[0]]?.name || 'я', 'ru'));
+}
+
+function worksManager() {
+  const { expenses } = data();
+  const freq = workFrequency(expenses);
+  const sheet = openSheet('Работы и интервалы', `
+    <p class="form-hint" style="margin-top:0">Включите напоминание у работ, которые нужно отслеживать. Нажмите на работу, чтобы изменить интервал или название.</p>
+    <div class="form-gap"></div>
+    <input class="search" id="wm-search" type="search" placeholder="Найти работу" autocomplete="off">
+    <div id="wm-list"></div>
+    <div class="form-gap"></div>
+    <button class="btn primary block" data-wm="new">＋ Новая работа</button>`);
+  const listEl = sheet.querySelector('#wm-list'), searchEl = sheet.querySelector('#wm-search');
+  const draw = () => {
+    const q = normName(searchEl.value);
+    const items = alive(app.db.works).filter(w => !q || normName(w.name).includes(q));
+    const groups = new Map();
+    for (const w of items) { const k = w.categoryId || '_none'; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(w); }
+    listEl.innerHTML = sortGroups(groups, freq)
+      .map(([cid, ws]) => `<h2 class="section">${esc(app.db.categories[cid]?.name || 'Без категории')}</h2><div class="list">`
+        + ws.sort((a, b) => ((b.remind && EV.hasSchedule(b)) - (a.remind && EV.hasSchedule(a))) || (freq.get(b.id)?.count || 0) - (freq.get(a.id)?.count || 0) || a.name.localeCompare(b.name, 'ru'))
+          .map(w => `<div class="row wm-row">
+            <button class="main" data-wm="edit" data-id="${esc(w.id)}" style="text-align:left">
+              <span class="title wrap">${esc(w.name)}</span>
+              <span class="meta">${esc(workLabel(w) || 'без интервала')}${freq.get(w.id) ? ` · выполнялась ${freq.get(w.id).count} ${plural(freq.get(w.id).count, 'раз', 'раза', 'раз')}` : ''}</span></button>
+            <span class="end"><input type="checkbox" class="sw" data-wm="toggle" data-id="${esc(w.id)}" ${w.remind && EV.hasSchedule(w) ? 'checked' : ''} aria-label="Напоминать"></span>
+          </div>`).join('') + '</div>').join('') || '<div class="empty">Ничего не найдено</div>';
+  };
+  draw();
+  searchEl.addEventListener('input', draw);
+  sheet.addEventListener('click', e => {
+    const el = e.target.closest('[data-wm]');
+    if (!el) return;
+    const w = app.db.works[el.dataset.id];
+    if (el.dataset.wm === 'new') { closeSheet(); workForm(null); }
+    if (el.dataset.wm === 'edit' && w) { closeSheet(); workForm(w); }
+    if (el.dataset.wm === 'toggle' && w) {
+      if (el.checked && !EV.hasSchedule(w)) { el.checked = false; closeSheet(); workForm({ ...w, remind: true }); toast('Задайте интервал'); return; }
+      upsert(app.db, 'works', { ...w, remind: el.checked });
+      saveDb(app.db); render(); sync.schedule();
+    }
+  });
+}
+
 function addToCalendar(list, v) {
   const items = list.filter(ev => ev.status !== 'done' && (ev.dueDate || ev.estDate)).map(ev => {
     const date = ev.dueDate || ev.estDate;
@@ -1119,25 +1218,43 @@ function vehicleSheet() {
 
 // ---------------------------------------------------------------- импорт / экспорт
 async function importFile(file) {
-  const text = await file.text();
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  if (isSqlite(bytes)) {
+    toast('Читаю базу Car Expenses…');
+    const SQL = await loadSqlJs();
+    return importCe(ceObjToRecords(ceDbToObj(SQL, bytes)));
+  }
+  const text = new TextDecoder().decode(bytes);
+  if (/<map>/.test(text.slice(0, 300)) && /<\?xml/.test(text.slice(0, 100))) {
+    toast('Это файл настроек. Выберите базу ce_db_backup_….db из той же папки');
+    return;
+  }
   if (text.trimStart().startsWith('{')) {
     const incoming = normalize(JSON.parse(text));
     const n = Object.values(incoming.refuels).length + Object.values(incoming.expenses).length;
     if (!confirm(`Резервная копия: ${n} записей. Объединить с текущими данными?`)) return;
     app.db = mergeDb(app.db, incoming);
+    maintain(app.db, () => uid('wrk'));
     commit();
     toast('Копия восстановлена');
     return;
   }
-  const recs = ceToRecords(text);
-  const msg = `Car Expenses: ${recs.vehicles.map(v => v.name).join(', ')}\n${recs.refuels.length} заправок, ${recs.expenses.length} расходов.\n\nИмпортировать? Уже перенесённые записи не задвоятся.`;
-  if (!confirm(msg)) return;
+  return importCe(ceToRecords(text));
+}
+
+function importCe(recs) {
+  const cars = recs.vehicles.map(v => {
+    const r = recs.refuels.filter(x => x.vehicleId === v.id).length, e = recs.expenses.filter(x => x.vehicleId === v.id).length;
+    return `• ${v.name}: ${r} заправок, ${e} расходов`;
+  }).join('\n');
+  if (!confirm(`Car Expenses\n${cars}\nВидов работ: ${recs.works.length}\n\nИмпортировать? Уже перенесённые записи не задвоятся, правленные вручную не изменятся.`)) return;
   const { added, updated } = importInto(app.db, recs);
-  if (!app.settings.vehicleId && recs.vehicles[0]) { app.settings.vehicleId = recs.vehicles[0].id; saveSettings(app.settings); }
+  maintain(app.db, () => uid('wrk'));
+  if ((!app.settings.vehicleId || !app.db.vehicles[app.settings.vehicleId]) && recs.vehicles[0]) { app.settings.vehicleId = recs.vehicles[0].id; saveSettings(app.settings); }
   app.tab = 'overview';
   commit();
-  const upd = updated.expenses + updated.refuels;
-  toast(`Добавлено: ${added.refuels} заправок, ${added.expenses} расходов, ${added.works} видов работ${upd ? `; обновлено записей: ${upd}` : ''}`);
+  const upd = Object.values(updated).reduce((s, x) => s + x, 0);
+  toast(`Добавлено: машин ${added.vehicles}, заправок ${added.refuels}, расходов ${added.expenses}${upd ? `; обновлено ${upd}` : ''}`);
 }
 
 async function shareOrDownload(name, text, mime) {
@@ -1210,6 +1327,7 @@ document.addEventListener('click', async e => {
     case 'add-expense': expenseForm(); break;
     case 'add-event': workForm(null, { pickExisting: true }); break;
     case 'add-part': partForm(); break;
+    case 'works-manager': worksManager(); break;
     case 'report': reportSetup(); break;
     case 'vehicle-details': vehicleDetailsForm(); break;
     case 'ics-all': { const { v, events } = eventsData(); addToCalendar(events, v); break; }
@@ -1306,9 +1424,7 @@ function toast(msg) {
 
 function ensureDefaults() {
   if (!alive(app.db.fuelTypes).length) ['АИ-92', 'АИ-95', 'АИ-98', 'ДТ'].forEach((name, i) => upsert(app.db, 'fuelTypes', { id: `def-f-${i}`, name }));
-  if (!alive(app.db.categories).length) [
-    ['Обслуживание', '#46a758'], ['Ремонт', '#e5484d'], ['Страховка и налоги', '#0090ff'], ['Мойка и уход', '#12a594'], ['Аксессуары', '#8e4ec6'], ['Парковка и дороги', '#f76b15'],
-  ].forEach(([name, color], i) => upsert(app.db, 'categories', { id: `def-c-${i}`, name, color, income: false }));
+  maintain(app.db, () => uid('wrk'));
 }
 
 async function connectToken(token, expires) {
@@ -1322,6 +1438,7 @@ async function connectToken(token, expires) {
 
 // ---------------------------------------------------------------- запуск
 const fromYa = disk.takeTokenFromHash();
+if (maintain(app.db, () => uid('wrk'))) saveDb(app.db);
 render();
 if (fromYa) connectToken(fromYa.token, fromYa.expires);
 else sync.run();
