@@ -8,7 +8,7 @@ import * as P from './parts.js';
 import { buildReport, REPORT_CSS } from './report.js';
 import { maintain, workFrequency, CATALOG_ORDER, normName } from './catalog.js';
 import { loadSqlJs, isSqlite, ceDbToObj } from './ce-db.js';
-import { YANDEX_CLIENT_ID, APP_VERSION } from './config.js';
+import { YANDEX_CLIENT_ID, YANDEX_PROXY, APP_VERSION } from './config.js';
 
 // ---------------------------------------------------------------- форматирование
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -371,12 +371,17 @@ function viewMore() {
         <div class="set-row"><span>Подключён</span><span class="hint">${s.lastSync ? 'синхр. ' + new Date(s.lastSync).toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : 'ещё не синхронизировано'}</span></div>
         ${s.lastSyncError ? `<div class="set-row"><span class="hint" style="color:var(--danger)">${esc(s.lastSyncError)}</span></div>` : ''}
         <button class="set-row accent" data-act="sync-now">Синхронизировать сейчас</button>
+        <button class="set-row" data-act="ya-check"><span>Проверить связь с Диском</span><span class="go">›</span></button>
         <button class="set-row danger" data-act="ya-logout">Отключить Диск</button>`
       : `
         ${YANDEX_CLIENT_ID ? '' : `<div class="field"><label for="cid">ClientID</label><input id="cid" placeholder="из oauth.yandex.ru" value="${esc(s.yandexClientId)}" autocomplete="off" autocapitalize="off" spellcheck="false"></div>`}
         <button class="set-row accent" data-act="ya-login" ${cid || !YANDEX_CLIENT_ID ? '' : 'disabled'}>Войти через Яндекс</button>
         <button class="set-row" data-act="ya-manual"><span>Войти по коду</span><span class="hint">если вход не вернулся в приложение</span></button>`}
     </div>
+    ${connected ? `<div class="list" style="margin-top:10px">
+      <div class="field stack"><label>Прокси (если Диск недоступен из браузера)</label>
+        <input id="proxyUrl" value="${esc(s.yandexProxy || '')}" placeholder="${esc(YANDEX_PROXY || 'https://functions.yandexcloud.net/…')}" autocomplete="off" autocapitalize="off" spellcheck="false" style="text-align:left"></div>
+      <button class="set-row accent" data-act="proxy-save">Сохранить прокси</button></div>` : ''}
     <p class="note">Данные хранятся в одном файле в папке «Приложения» на вашем Диске. Приложение видит только её. Синхронизация идёт при запуске и после каждой записи.</p>
 
     <h2 class="section">Данные</h2>
@@ -1391,6 +1396,22 @@ document.addEventListener('click', async e => {
         saveSettings(app.settings); app.syncState = 'off'; render();
       }
       break;
+    case 'ya-check': {
+      toast('Проверяю…');
+      const res = await disk.diagnose(app.settings.yandexToken);
+      openSheet('Связь с Диском', `<div class="list">${res.map(r => `<div class="row"><span class="ico" style="background:${r.ok ? 'var(--accent)' : 'var(--danger)'}">${r.ok ? '✓' : '✕'}</span>
+        <span class="main"><span class="title">${esc(r.name)}</span><span class="meta" style="white-space:normal">${esc(r.note)}</span></span></div>`).join('')}</div>
+        <p class="form-hint">Сделайте скриншот этого окна и пришлите его, если что-то красное.</p>`);
+      break;
+    }
+    case 'proxy-save': {
+      app.settings.yandexProxy = ($('#proxyUrl').value || '').trim();
+      saveSettings(app.settings);
+      disk.setProxy(app.settings.yandexProxy || YANDEX_PROXY);
+      toast(app.settings.yandexProxy ? 'Прокси сохранён' : 'Прокси отключён');
+      sync.schedule(200);
+      break;
+    }
     case 'sync-now':
       await sync.run();
       toast(app.syncState === 'error' ? (app.syncMsg || 'Ошибка') : 'Синхронизировано');
@@ -1437,6 +1458,7 @@ async function connectToken(token, expires) {
 }
 
 // ---------------------------------------------------------------- запуск
+disk.setProxy(app.settings.yandexProxy || YANDEX_PROXY);
 const fromYa = disk.takeTokenFromHash();
 if (maintain(app.db, () => uid('wrk'))) saveDb(app.db);
 render();
