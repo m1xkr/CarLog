@@ -1,0 +1,133 @@
+// Импорт текстового бэкапа Car Expenses (CE v.30.x): разделы "### ... info", таблицы через табуляцию.
+// Записям даются стабильные id, поэтому повторный импорт того же файла не создаёт дублей.
+
+const PALETTE = ['#e5484d', '#f76b15', '#ffc53d', '#46a758', '#12a594', '#0090ff', '#3e63dd', '#8e4ec6',
+  '#d6409f', '#978365', '#ad7f58', '#6f6e77', '#29a383', '#5b5bd6', '#e54666', '#a18072', '#2b9a66'];
+
+const num = s => {
+  const t = String(s ?? '').trim().replace(/\s/g, '').replace(',', '.');
+  const v = parseFloat(t);
+  return Number.isFinite(v) ? v : 0;
+};
+const isoDate = yyyymmdd => `${yyyymmdd.slice(0, 4)}-${yyyymmdd.slice(4, 6)}-${yyyymmdd.slice(6, 8)}`;
+const splitList = s => String(s ?? '').split(';').map(x => x.trim());
+
+export function parseCeText(text) {
+  const sections = {};
+  let cur = null, header = null;
+  for (const raw of text.split(/\r?\n/)) {
+    if (raw.startsWith('###')) {
+      cur = raw.replace(/^###\s*/, '').trim();
+      sections[cur] = [];
+      header = null;
+      continue;
+    }
+    if (!cur || !raw.trim()) continue;
+    const cells = raw.split('\t').map(c => c.trim());
+    if (!header) { header = cells; continue; }
+    const row = {};
+    header.forEach((h, i) => { if (!(h in row)) row[h] = cells[i] ?? ''; });
+    sections[cur].push(row);
+  }
+  const pick = prefix => Object.entries(sections).filter(([k]) => k.startsWith(prefix)).flatMap(([, v]) => v);
+  if (!Object.keys(sections).some(k => k.startsWith('CE v.'))) throw new Error('Это не похоже на экспорт Car Expenses');
+  return {
+    vehicles: pick('vehicle info'),
+    fuelTypes: pick('fuel_type info'),
+    categories: pick('category info'),
+    patterns: pick('pattern info'),
+    expenses: pick('expenses info'),
+    records: pick('records info'),
+  };
+}
+
+// Возвращает набор записей в формате приложения (без updatedAt — его ставит importInto).
+export function ceToRecords(text) {
+  const ce = parseCeText(text);
+  const out = { vehicles: [], fuelTypes: [], categories: [], refuels: [], expenses: [] };
+
+  const vehIdByName = {};
+  for (const v of ce.vehicles) {
+    const id = `ce-v-${v.name}`;
+    vehIdByName[v.name] = id;
+    out.vehicles.push({ id, name: v.name, comment: v.comment || '', tankVolume: num(v.tank_volume) || null });
+  }
+  const fuelName = {};
+  for (const f of ce.fuelTypes) {
+    fuelName[f._id] = f.name;
+    out.fuelTypes.push({ id: `ce-f-${f._id}`, name: f.name });
+  }
+  const catById = {};
+  for (const c of ce.categories) {
+    catById[c._id] = c;
+    out.categories.push({
+      id: `ce-c-${c._id}`, name: c.name,
+      color: PALETTE[num(c.color) % PALETTE.length],
+      income: c.expense_type === '0',
+    });
+  }
+  const patterns = Object.fromEntries(ce.patterns.map(p => [p._id, p]));
+
+  for (const r of ce.records) {
+    const vid = vehIdByName[r.id_vehicle] || `ce-v-${r.id_vehicle}`;
+    const litres = num(r.volume), price = num(r.volumecost);
+    out.refuels.push({
+      id: `ce-r-${r.id_vehicle}-${r.date}-${num(r.mileage)}`,
+      vehicleId: vid,
+      date: isoDate(r.date),
+      odo: Math.round(num(r.mileage)),
+      litres, pricePerL: price,
+      total: num(r.cost) || Math.round(litres * price * 100) / 100,
+      fuelTypeId: fuelName[r.id_fueltype] !== undefined ? `ce-f-${r.id_fueltype}` : null,
+      full: r.mark === '10' || r.mark === '',
+      missed: r.missed === '1',
+      note: r.note || '',
+    });
+  }
+
+  for (const e of ce.expenses) {
+    const vid = vehIdByName[e.id_vehicle] || `ce-v-${e.id_vehicle}`;
+    const pids = splitList(e.id_pattern).filter(p => patterns[p]);
+    const names = pids.map(p => patterns[p].name);
+    const catId = pids.length ? patterns[pids[0]].id_category : null;
+    const parts = num(e.total_costpart), work = num(e.total_costwork);
+    let total = parts + work;
+    if (!total) total = [...splitList(e.costpart), ...splitList(e.costwork)].reduce((s, x) => s + num(x), 0);
+    let odo = Math.round(num(e.mileage));
+    const odoEstimated = odo === 0;
+    if (odoEstimated) odo = Math.round(num(e.predicated_mileage));
+    const extra = [e.name, e.note, ...splitList(e.comment)].filter(Boolean);
+    const patternTitle = names.join(' + ');
+    const title = (extra.length && names.length === 1) ? extra[0] : (patternTitle || 'Расход');
+    const notes = [...new Set([...(title !== patternTitle ? [patternTitle] : []), ...extra].filter(x => x && x !== title))];
+    out.expenses.push({
+      id: `ce-e-${e.id_vehicle}-${e._id}`,
+      vehicleId: vid,
+      date: isoDate(e.date),
+      odo: odo || null,
+      odoEstimated,
+      title,
+      kind: patternTitle,
+      categoryId: catId && catById[catId] ? `ce-c-${catId}` : null,
+      parts, work,
+      total: Math.round(total * 100) / 100,
+      note: notes.join('; '),
+    });
+  }
+  return out;
+}
+
+// Добавляет в базу только записи, которых ещё нет (в т.ч. удалённых пользователем — они не воскресают).
+// updatedAt = 1, чтобы любая ручная правка на любом устройстве была «новее» импорта.
+export function importInto(db, recs) {
+  const added = {};
+  for (const [coll, list] of Object.entries(recs)) {
+    added[coll] = 0;
+    for (const r of list) {
+      if (db[coll][r.id]) continue;
+      db[coll][r.id] = { ...r, updatedAt: 1 };
+      added[coll]++;
+    }
+  }
+  return added;
+}

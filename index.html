@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Бортжурнал</title>
+  <meta name="description" content="Учёт заправок и расходов на автомобиль с синхронизацией через Яндекс Диск">
+  <meta name="theme-color" content="#f2f2f7" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0f1012" media="(prefers-color-scheme: dark)">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Бортжурнал">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon-192.png" type="image/png">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+  <header class="topbar">
+    <button class="vehicle" id="vehicleBtn" type="button"><span id="vehicleName">Бортжурнал</span></button>
+    <button class="sync" id="syncBtn" type="button" aria-label="Синхронизация"><i class="dot"></i><span id="syncText"></span></button>
+  </header>
+
+  <main id="view" tabindex="-1"></main>
+
+  <nav class="tabbar" id="tabbar">
+    <button data-tab="overview" class="active">
+      <svg viewBox="0 0 24 24"><path d="M4 13a8 8 0 0 1 16 0M12 13l4-4M3 17h18"/></svg><span>Обзор</span></button>
+    <button data-tab="refuels">
+      <svg viewBox="0 0 24 24"><path d="M5 21V5a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v16M3 21h14M5 10h10M15 8l3 3v6a1.5 1.5 0 0 0 3 0V9l-3-3"/></svg><span>Заправки</span></button>
+    <button data-tab="expenses">
+      <svg viewBox="0 0 24 24"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.2L3 17.8V21h3.2l6.3-6.3a4 4 0 0 0 5.2-5.4l-2.6 2.6-2.4-.6-.6-2.4z"/></svg><span>Расходы</span></button>
+    <button data-tab="stats">
+      <svg viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg><span>Статистика</span></button>
+    <button data-tab="more">
+      <svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg><span>Ещё</span></button>
+  </nav>
+
+  <div class="sheet-backdrop" id="sheetBackdrop" hidden>
+    <section class="sheet" id="sheet" role="dialog" aria-modal="true"></section>
+  </div>
+  <div class="toast" id="toast" role="status" hidden></div>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
