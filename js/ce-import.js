@@ -55,7 +55,7 @@ export function ceObjToRecords(ce) {
   for (const v of ce.vehicles) {
     const id = `ce-v-${v.name}`;
     vehIdByName[v.name] = id;
-    out.vehicles.push({ id, name: v.name, comment: v.comment || '', tankVolume: num(v.tank_volume) || null,
+    out.vehicles.push({ id, ceId: num(v._id) || null, name: v.name, comment: v.comment || '', tankVolume: num(v.tank_volume) || null,
       make: v.veh_manufacturer || '', model: v.veh_model || '', vin: (v.veh_vin || '').toUpperCase(),
       year: v.veh_birthday && v.veh_birthday !== '0' ? String(v.veh_birthday).slice(0, 4) : '' });
   }
@@ -83,6 +83,7 @@ export function ceObjToRecords(ce) {
     const onceDate = /^\d{8}$/.test(p.period_date_once || '') && p.period_date_once !== '0' ? isoDate(p.period_date_once) : null;
     out.works.push({
       id: `ce-p-${p._id}`,
+      ceId: num(p._id) || null,
       name: p.name,
       categoryId: catById[p.id_category] ? `ce-c-${p.id_category}` : null,
       everyKm: (type === '1' || type === '3') && km ? km : null,
@@ -172,9 +173,12 @@ export function importInto(db, recs) {
     alias[w.id] = existing.id;
     for (const [from, to] of Object.entries(alias)) if (to === w.id) alias[from] = existing.id;
     if ((existing.updatedAt || 0) < IMPORT_STAMP) {
-      db.works[existing.id] = { ...existing, categoryId: w.categoryId || existing.categoryId, everyKm: w.everyKm, everyMonths: w.everyMonths,
+      db.works[existing.id] = { ...existing, ceId: existing.ceId || w.ceId, categoryId: w.categoryId || existing.categoryId, everyKm: w.everyKm, everyMonths: w.everyMonths,
         onceKm: w.onceKm, onceDate: w.onceDate, remind: w.remind, updatedAt: IMPORT_STAMP };
       updated.works++;
+    } else if (!existing.ceId && w.ceId) {
+      // номер шаблона из Car Expenses — служебное поле для обратной выгрузки, правку пользователя не трогаем
+      db.works[existing.id] = { ...existing, ceId: w.ceId };
     }
   }
   const mapWork = id => alias[id] || id;

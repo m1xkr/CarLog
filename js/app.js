@@ -9,6 +9,7 @@ import * as P from './parts.js';
 import { buildReport, REPORT_CSS } from './report.js';
 import { maintain, workFrequency, CATALOG_ORDER, normName } from './catalog.js';
 import { loadSqlJs, isSqlite, ceDbToObj } from './ce-db.js';
+import { buildCeDb, cePrefsXml, ceBackupName } from './ce-export.js';
 import { YANDEX_CLIENT_ID, YANDEX_PROXY, GOOGLE_CLIENT_ID, APP_VERSION } from './config.js';
 
 // ---------------------------------------------------------------- форматирование
@@ -414,6 +415,7 @@ function viewMore() {
       <button class="set-row" data-act="export-json"><span>Сохранить резервную копию</span><span class="go">›</span></button>
       <button class="set-row" data-act="restore"><span>Загрузить из резервной копии</span><span class="go">›</span></button>
       <button class="set-row" data-act="export-csv"><span>Выгрузить таблицу (CSV)</span><span class="go">›</span></button>
+      <button class="set-row" data-act="ce-export"><span>Выгрузить для Car Expenses</span><span class="hint">.db для Android</span></button>
       <button class="set-row accent" data-act="report"><span>Отчёт по обслуживанию для продажи</span><span class="go">›</span></button>
     </div>
 
@@ -1318,6 +1320,60 @@ function restoreSheet(raw) {
   });
 }
 
+// Выгрузка в резервную копию Car Expenses (все машины сразу).
+function ceExportSheet() {
+  const cats = app.db.categories;
+  const data = {
+    vehicles: alive(app.db.vehicles), fuelTypes: alive(app.db.fuelTypes), categories: alive(app.db.categories), works: alive(app.db.works),
+    refuels: alive(app.db.refuels), expenses: alive(app.db.expenses).map(e => ({ ...e, income: !!cats[e.categoryId]?.income })),
+  };
+  if (!data.vehicles.length) { toast('Нет данных для выгрузки'); return; }
+  const parts = alive(app.db.parts).length;
+  const sheet = openSheet('Для Car Expenses', `
+    <div class="card pad">
+      <div style="font-size:17px;font-weight:600">Резервная копия Car Expenses 30.87</div>
+      <div class="note" style="margin:8px 0 0">${esc(data.vehicles.map(v => v.name).join(', '))}</div>
+      <div class="left num" style="margin-top:10px"><span class="due">заправок ${data.refuels.length}</span><span class="due">расходов ${data.expenses.length}</span><span class="due">шаблонов ${data.works.length}</span></div>
+    </div>
+    <div class="form-gap"></div>
+    <button class="btn primary block" data-cex="db">1. Скачать базу (.db)</button>
+    <div class="form-gap"></div>
+    <button class="btn block" data-cex="xml">2. Скачать файл настроек (.xml)</button>
+    <h2 class="section">Как восстановить в Car Expenses</h2>
+    <div class="card pad" style="font-size:14.5px;line-height:1.5">
+      1. Скопируйте оба файла на Android-телефон в ту же папку, где Car Expenses хранит свои резервные копии (туда, откуда вы брали ce_db_backup…).<br>
+      2. В Car Expenses: меню → «Резервное копирование» → выберите копию с сегодняшней датой → «Восстановить».<br>
+      3. Восстановление <b>заменит</b> все данные в Car Expenses этими.
+    </div>
+    <p class="form-hint">События Car Expenses пересчитает сам по шаблонам и истории.${parts ? ' Запчасти с ресурсом в Car Expenses не переносятся — у него другой формат.' : ''} Если в расходе было несколько работ, вся сумма записывается на первую.</p>`);
+  sheet.addEventListener('click', async e => {
+    const kind = e.target.closest('[data-cex]')?.dataset.cex;
+    if (!kind) return;
+    try {
+      if (kind === 'db') {
+        toast('Собираю базу…');
+        const SQL = await loadSqlJs();
+        const bytes = buildCeDb(SQL, data);
+        await shareOrDownloadBytes(ceBackupName('db'), bytes, 'application/octet-stream');
+      } else {
+        await shareOrDownload(ceBackupName('xml'), cePrefsXml(1), 'text/xml');
+      }
+    } catch (err) { toast(err.message || 'Не удалось выгрузить'); }
+  });
+}
+
+async function shareOrDownloadBytes(name, bytes, mime) {
+  const blob = new Blob([bytes], { type: mime });
+  try {
+    const file = new File([blob], name, { type: mime });
+    if (navigator.canShare?.({ files: [file] })) { await navigator.share({ files: [file], title: name }); return; }
+  } catch (e) { if (e?.name === 'AbortError') return; }
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+}
+
 function importCe(recs) {
   const cars = recs.vehicles.map(v => {
     const r = recs.refuels.filter(x => x.vehicleId === v.id).length, e = recs.expenses.filter(x => x.vehicleId === v.id).length;
@@ -1415,6 +1471,7 @@ document.addEventListener('click', async e => {
       $('#fileInput').click();
       break;
     }
+    case 'ce-export': ceExportSheet(); break;
     case 'restore':
       $('#fileInput').click();
       break;

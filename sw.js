@@ -1,8 +1,8 @@
 // Офлайн-кэш оболочки приложения. При выпуске новой версии меняйте VERSION.
-const VERSION = 'carlog-1.4.3';
+const VERSION = 'carlog-1.5.0';
 const SHELL = [
   './', 'index.html', 'manifest.webmanifest', 'css/app.css',
-  'js/app.js', 'js/store.js', 'js/stats.js', 'js/ce-import.js', 'js/yadisk.js', 'js/sync.js', 'js/config.js', 'js/events.js', 'js/parts.js', 'js/report.js', 'js/catalog.js', 'js/ce-db.js', 'js/gdrive.js',
+  'js/app.js', 'js/store.js', 'js/stats.js', 'js/ce-import.js', 'js/yadisk.js', 'js/sync.js', 'js/config.js', 'js/events.js', 'js/parts.js', 'js/report.js', 'js/catalog.js', 'js/ce-db.js', 'js/gdrive.js', 'js/ce-export.js', 'js/ce-template.js',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png',
 ];
 
