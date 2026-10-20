@@ -48,6 +48,33 @@
   <div class="toast" id="toast" role="status" hidden></div>
   <div class="report" id="report" hidden></div>
 
+  <div class="boot-error" id="bootError" hidden>
+    <b>Приложение не запустилось</b>
+    <p>Скорее всего, телефон взял часть файлов из старой версии. Ваши записи хранятся отдельно и не пострадают.</p>
+    <pre id="bootErrorText"></pre>
+    <button type="button" id="bootFix">Обновить приложение</button>
+  </div>
+  <script>
+    // Страховка от «белого экрана»: если модули не загрузились или упали при старте,
+    // показываем ошибку и кнопку, которая чистит кэш оболочки (данные в localStorage не трогает).
+    (function () {
+      var errs = [];
+      function show() {
+        if (window.__carlogReady) return;
+        document.getElementById('bootErrorText').textContent = errs.join('\n') || 'Нет ответа от модулей приложения';
+        document.getElementById('bootError').hidden = false;
+      }
+      window.addEventListener('error', function (e) { errs.push((e.message || 'Ошибка') + (e.filename ? ' @ ' + e.filename.split('/').pop() + ':' + e.lineno : '')); if (!window.__carlogReady) show(); }, true);
+      window.addEventListener('unhandledrejection', function (e) { errs.push(String(e.reason && e.reason.message || e.reason)); });
+      setTimeout(show, 6000);
+      document.getElementById('bootFix').onclick = function () {
+        var jobs = [];
+        if (navigator.serviceWorker) jobs.push(navigator.serviceWorker.getRegistrations().then(function (rs) { return Promise.all(rs.map(function (r) { return r.unregister(); })); }));
+        if (window.caches) jobs.push(caches.keys().then(function (ks) { return Promise.all(ks.map(function (k) { return caches.delete(k); })); }));
+        Promise.all(jobs).catch(function () {}).then(function () { location.replace(location.pathname + '?v=' + Date.now()); });
+      };
+    })();
+  </script>
   <script type="module" src="js/app.js"></script>
 </body>
 </html>

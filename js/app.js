@@ -1458,10 +1458,12 @@ async function connectToken(token, expires) {
 }
 
 // ---------------------------------------------------------------- запуск
-disk.setProxy(app.settings.yandexProxy || YANDEX_PROXY);
+if (disk.setProxy) disk.setProxy(app.settings.yandexProxy || YANDEX_PROXY);
 const fromYa = disk.takeTokenFromHash();
-if (maintain(app.db, () => uid('wrk'))) saveDb(app.db);
+try { if (maintain(app.db, () => uid('wrk'))) saveDb(app.db); }
+catch (e) { console.error(e); setTimeout(() => toast('Не удалось обновить справочник работ: ' + e.message), 500); }
 render();
+window.__carlogReady = true;
 if (fromYa) connectToken(fromYa.token, fromYa.expires);
 else sync.run();
 

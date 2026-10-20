@@ -303,3 +303,11 @@ input.sw:checked { background: var(--accent); box-shadow: none; }
 input.sw:checked::after { transform: translateX(20px); }
 
 .field .search { text-align: left; }
+
+/* ---------- аварийный экран запуска ---------- */
+.boot-error { position: fixed; inset: 0; z-index: 100; background: var(--bg); padding: calc(env(safe-area-inset-top) + 40px) 24px 24px; display: flex; flex-direction: column; gap: 12px; }
+.boot-error[hidden] { display: none; }
+.boot-error b { font-size: 20px; }
+.boot-error p { margin: 0; color: var(--muted); }
+.boot-error pre { white-space: pre-wrap; word-break: break-word; font-size: 12px; background: var(--card); padding: 10px; border-radius: 10px; max-height: 40vh; overflow: auto; }
+.boot-error button { height: 48px; border-radius: 12px; background: var(--accent); color: #fff; font-weight: 600; }

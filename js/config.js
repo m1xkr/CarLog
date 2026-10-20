@@ -6,4 +6,4 @@ export const YANDEX_CLIENT_ID = '7db79f4b5e5e48b2821e0acffed22ea3';
 // не разрешает запросы со страниц (ошибка CORS). Можно задать и в приложении: «⚙» → «Яндекс Диск».
 export const YANDEX_PROXY = '';
 
-export const APP_VERSION = '1.3.1';
+export const APP_VERSION = '1.3.2';
