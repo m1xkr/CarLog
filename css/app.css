@@ -229,3 +229,28 @@ h2.section { font-size: 13px; font-weight: 600; text-transform: uppercase; lette
 @media (min-width: 600px) {
   .grid2 { grid-template-columns: repeat(4, 1fr); }
 }
+
+/* ---------- верхние кнопки ---------- */
+.top-actions { display: flex; align-items: center; gap: 8px; flex: none; }
+.gear { width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; background: var(--card); box-shadow: var(--shadow); color: var(--muted); }
+.gear svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.gear.active { color: var(--accent); }
+.tabbar button { position: relative; }
+.tab-badge { position: absolute; top: 5px; left: calc(50% + 6px); min-width: 17px; height: 17px; padding: 0 4px; border-radius: 9px; background: var(--danger); color: #fff; font-size: 11px; font-weight: 700; line-height: 17px; text-align: center; }
+.tab-badge[hidden] { display: none; }
+
+/* ---------- события ---------- */
+.row.ev { align-items: flex-start; padding-top: 12px; padding-bottom: 12px; }
+.row.ev .ico { position: relative; margin-top: 2px; }
+.row .ico .cnt { position: absolute; right: -5px; bottom: -5px; min-width: 18px; height: 18px; padding: 0 4px; border-radius: 9px; background: var(--card); color: var(--text); font-size: 11px; line-height: 18px; text-align: center; box-shadow: 0 0 0 1.5px var(--line); }
+.row .left, .left { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.due { font-size: 12.5px; padding: 2px 7px; border-radius: 6px; background: var(--card-2); color: var(--muted); }
+.due.over { background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--danger); font-weight: 600; }
+.prog { display: block; height: 4px; border-radius: 2px; background: var(--card-2); margin-top: 9px; overflow: hidden; }
+.prog i { display: block; height: 100%; border-radius: 2px; }
+
+/* ---------- виды работ в расходе ---------- */
+.wchips { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 0 4px; }
+.wchip { display: inline-flex; align-items: center; gap: 6px; padding: 5px 6px 5px 10px; border-radius: 8px; background: var(--accent-soft); color: var(--accent); font-size: 14px; font-weight: 550; }
+.wchip button { width: 20px; height: 20px; border-radius: 50%; font-size: 11px; color: var(--accent); background: color-mix(in srgb, var(--accent) 16%, transparent); }
+.field select.addwork { direction: ltr; text-align: left; color: var(--accent); padding: 8px 0 12px; }

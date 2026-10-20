@@ -44,7 +44,7 @@ export function parseCeText(text) {
 // Возвращает набор записей в формате приложения (без updatedAt — его ставит importInto).
 export function ceToRecords(text) {
   const ce = parseCeText(text);
-  const out = { vehicles: [], fuelTypes: [], categories: [], refuels: [], expenses: [] };
+  const out = { vehicles: [], fuelTypes: [], categories: [], works: [], refuels: [], expenses: [] };
 
   const vehIdByName = {};
   for (const v of ce.vehicles) {
@@ -67,6 +67,24 @@ export function ceToRecords(text) {
     });
   }
   const patterns = Object.fromEntries(ce.patterns.map(p => [p._id, p]));
+
+  // Шаблоны трат CE → виды работ. period_type: 0 — нет, 1 — км, 2 — месяцы, 3 — км и месяцы,
+  // 4 — разово при пробеге, 5 — разово к дате.
+  for (const p of ce.patterns) {
+    const type = p.period_type;
+    const km = Math.round(num(p.period_mileage)), months = num(p.period_month);
+    const onceDate = /^\d{8}$/.test(p.period_date_once || '') && p.period_date_once !== '0' ? isoDate(p.period_date_once) : null;
+    out.works.push({
+      id: `ce-p-${p._id}`,
+      name: p.name,
+      categoryId: catById[p.id_category] ? `ce-c-${p.id_category}` : null,
+      everyKm: (type === '1' || type === '3') && km ? km : null,
+      everyMonths: (type === '2' || type === '3') && months ? months : null,
+      onceKm: type === '4' ? Math.round(num(p.period_mileage_once)) || null : null,
+      onceDate: type === '5' ? onceDate : null,
+      remind: p.event_show === '1',
+    });
+  }
 
   for (const r of ce.records) {
     const vid = vehIdByName[r.id_vehicle] || `ce-v-${r.id_vehicle}`;
@@ -108,6 +126,7 @@ export function ceToRecords(text) {
       odoEstimated,
       title,
       kind: patternTitle,
+      workIds: pids.map(p => `ce-p-${p}`),
       categoryId: catId && catById[catId] ? `ce-c-${catId}` : null,
       parts, work,
       total: Math.round(total * 100) / 100,
@@ -117,17 +136,20 @@ export function ceToRecords(text) {
   return out;
 }
 
-// Добавляет в базу только записи, которых ещё нет (в т.ч. удалённых пользователем — они не воскресают).
-// updatedAt = 1, чтобы любая ручная правка на любом устройстве была «новее» импорта.
+// Добавляет в базу записи, которых ещё нет. Удалённые пользователем не воскресают.
+// Записи, импортированные прежней версией и ни разу не правленные (updatedAt < IMPORT_STAMP),
+// обновляются — так к старым данным добавляются новые поля (например, виды работ).
+// Метка остаётся маленьким числом, чтобы любая ручная правка была «новее» импорта.
+export const IMPORT_STAMP = 2;
 export function importInto(db, recs) {
-  const added = {};
+  const added = {}, updated = {};
   for (const [coll, list] of Object.entries(recs)) {
-    added[coll] = 0;
+    added[coll] = 0; updated[coll] = 0;
     for (const r of list) {
-      if (db[coll][r.id]) continue;
-      db[coll][r.id] = { ...r, updatedAt: 1 };
-      added[coll]++;
+      const cur = db[coll][r.id];
+      if (!cur) { db[coll][r.id] = { ...r, updatedAt: IMPORT_STAMP }; added[coll]++; }
+      else if (!cur.deleted && (cur.updatedAt || 0) < IMPORT_STAMP) { db[coll][r.id] = { ...r, updatedAt: IMPORT_STAMP }; updated[coll]++; }
     }
   }
-  return added;
+  return { added, updated };
 }

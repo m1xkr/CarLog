@@ -1,7 +1,7 @@
 // Хранилище данных: коллекции записей с id/updatedAt/deleted, сохранение в localStorage,
 // слияние двух копий (локальной и облачной) по принципу «побеждает более свежая правка».
 
-export const COLLECTIONS = ['vehicles', 'fuelTypes', 'categories', 'refuels', 'expenses'];
+export const COLLECTIONS = ['vehicles', 'fuelTypes', 'categories', 'works', 'refuels', 'expenses'];
 const DATA_KEY = 'carlog.data.v1';
 const SETTINGS_KEY = 'carlog.settings.v1';
 

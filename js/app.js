@@ -3,6 +3,7 @@ import { ceToRecords, importInto } from './ce-import.js';
 import * as S from './stats.js';
 import * as disk from './yadisk.js';
 import { createSync } from './sync.js';
+import * as EV from './events.js';
 import { YANDEX_CLIENT_ID, APP_VERSION } from './config.js';
 
 // ---------------------------------------------------------------- форматирование
@@ -53,7 +54,12 @@ function data() {
   const refuels = v ? alive(app.db.refuels).filter(r => r.vehicleId === v.id) : [];
   const expenses = v ? alive(app.db.expenses).filter(e => e.vehicleId === v.id)
     .map(e => ({ ...e, income: !!cats[e.categoryId]?.income })) : [];
-  return { v, refuels, expenses };
+  const works = alive(app.db.works);
+  return { v, refuels, expenses, works };
+}
+function eventsData() {
+  const { v, refuels, expenses, works } = data();
+  return { v, ...EV.computeEvents(works, expenses, refuels, today()) };
 }
 const fuelName = id => app.db.fuelTypes[id]?.name || 'Топливо';
 
@@ -64,8 +70,12 @@ function render() {
   $('#vehicleBtn').classList.toggle('multi', vehicles().length > 1);
   document.querySelectorAll('.tabbar button').forEach(b => b.classList.toggle('active', b.dataset.tab === app.tab));
   const view = $('#view');
-  const html = ({ overview: viewOverview, refuels: viewRefuels, expenses: viewExpenses, stats: viewStats, more: viewMore })[app.tab]();
+  const html = ({ overview: viewOverview, events: viewEvents, refuels: viewRefuels, expenses: viewExpenses, stats: viewStats, more: viewMore })[app.tab]();
   view.innerHTML = html;
+  const urgent = v ? eventsData().events.filter(e => e.status === 'overdue' || e.status === 'soon').length : 0;
+  const badge = $('#eventsBadge');
+  badge.textContent = urgent; badge.hidden = !urgent;
+  $('#gearBtn').classList.toggle('active', app.tab === 'more');
   renderSync();
 }
 
@@ -127,6 +137,7 @@ function viewOverview() {
       <button class="btn fuel" data-act="add-refuel">＋ Заправка</button>
       <button class="btn primary" data-act="add-expense">＋ Расход</button>
     </div>
+    ${overviewEvents()}
     ${lastRef ? `<p class="note">Последняя заправка ${fmtDate(lastRef.date)}: ${nf(lastRef.litres, 2)} л по ${nf(lastRef.pricePerL, 2)} ₽</p>` : ''}
     <h2 class="section">Последние записи</h2>
     ${recent.length ? `<div class="list">${recent.map(x => x.kind === 'refuel' ? refuelRow(x.rec, cons, true) : expenseRow(x.rec, true)).join('')}</div>`
@@ -490,16 +501,42 @@ function refuelForm(rec = null) {
   }
 }
 
-function expenseForm(rec = null) {
+function workLabel(w) {
+  const parts = [];
+  if (w.everyKm) parts.push(`${nf(w.everyKm)} км`);
+  if (w.everyMonths) parts.push(monthsLabel(w.everyMonths));
+  if (w.onceKm) parts.push(`разово на ${nf(w.onceKm)} км`);
+  if (w.onceDate) parts.push(`разово ${fmtDate(w.onceDate)}`);
+  return parts.join(' / ');
+}
+function monthsLabel(m) {
+  if (m % 12 === 0) { const y = m / 12; return `${y} ${plural(y, 'год', 'года', 'лет')}`; }
+  return `${nf(m, m % 1 ? 1 : 0)} мес`;
+}
+function plural(n, one, few, many) {
+  const a = Math.abs(n) % 100, b = a % 10;
+  if (a > 10 && a < 20) return many;
+  if (b > 1 && b < 5) return few;
+  if (b === 1) return one;
+  return many;
+}
+
+function expenseForm(rec = null, preset = {}) {
   const { v, refuels, expenses } = data();
   if (!v) return toast('Сначала добавьте автомобиль');
   const titles = [...new Set(expenses.flatMap(e => [e.title, e.kind]).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'ru'));
   const lastCat = [...expenses].sort((a, b) => b.date.localeCompare(a.date))[0]?.categoryId;
-  const e = rec || { date: today(), odo: S.lastOdo(refuels, expenses), title: '', categoryId: lastCat, total: null, parts: 0, work: 0, note: '' };
+  const e = rec || { date: today(), odo: S.lastOdo(refuels, expenses), title: preset.title || '', categoryId: preset.categoryId || lastCat, total: null, parts: 0, work: 0, note: '', workIds: preset.workIds || [] };
+  const selected = [...(e.workIds || [])];
+  let catTouched = !!rec;
   const hasSplit = !!(e.parts && e.work);
   const sheet = openSheet(rec ? 'Расход' : 'Новый расход', `
     <div class="form">
-      <div class="field stack"><label>Что сделано / куплено</label><input id="e-title" list="e-titles" value="${esc(e.title)}" placeholder="Замена масла, мойка, страховка…" style="text-align:left"></div>
+      <div class="field stack"><label>Виды работ — по ним продлеваются события ТО</label>
+        <div class="wchips" id="e-works"></div>
+        <select id="e-addwork" class="addwork"></select>
+      </div>
+      <div class="field stack"><label>Описание</label><input id="e-title" list="e-titles" value="${esc(e.title)}" placeholder="Замена масла, мойка, страховка…" style="text-align:left"></div>
       <datalist id="e-titles">${titles.map(t => `<option value="${esc(t)}">`).join('')}</datalist>
       ${field('Категория', `<select id="e-cat">${optionList('categories', e.categoryId, '＋ Новая категория…')}</select>`)}
       ${field('Дата', `<input id="e-date" type="date" value="${esc(e.date)}">`)}
@@ -517,18 +554,21 @@ function expenseForm(rec = null) {
     ${rec?.odoEstimated ? '<p class="form-hint">Пробег у этой записи был оценочным (перенесён из Car Expenses).</p>' : ''}`,
   {
     onSave() {
-      const title = sheet.querySelector('#e-title').value.trim();
+      let title = sheet.querySelector('#e-title').value.trim();
       const parts = parseNum(sheet.querySelector('#e-parts').value) || 0;
       const work = parseNum(sheet.querySelector('#e-work').value) || 0;
       let total = parseNum(sheet.querySelector('#e-total').value);
       if (parts && work) total = parts + work;
       if (total == null) total = parts + work;
-      if (!title) { toast('Укажите, на что расход'); return false; }
-      if (!total) { toast('Укажите сумму'); return false; }
+      if (!title && selected.length) title = selected.map(id => app.db.works[id]?.name).filter(Boolean).join(' + ');
+      if (!title) { toast('Укажите вид работ или описание'); return false; }
+      if (total == null || total < 0) { toast('Укажите сумму'); return false; }
       const odo = parseNum(sheet.querySelector('#e-odo').value);
       const cat = sheet.querySelector('#e-cat').value;
       upsert(app.db, 'expenses', {
         ...(rec || {}), id: rec?.id, vehicleId: v.id, title,
+        workIds: [...selected],
+        kind: selected.map(id => app.db.works[id]?.name).filter(Boolean).join(' + ') || rec?.kind || '',
         categoryId: cat === '__new' ? null : cat,
         date: sheet.querySelector('#e-date').value || today(),
         odo: odo ? Math.round(odo) : null,
@@ -537,11 +577,46 @@ function expenseForm(rec = null) {
         note: sheet.querySelector('#e-note').value.trim(),
       });
       commit();
-      toast(rec ? 'Сохранено' : 'Расход добавлен');
+      const extended = selected.map(id => app.db.works[id]).filter(w => w?.remind && (w.everyKm || w.everyMonths));
+      toast(extended.length ? `Сохранено. Продлено событий: ${extended.length}` : (rec ? 'Сохранено' : 'Расход добавлен'));
     },
     onDelete: rec ? () => { remove(app.db, 'expenses', rec.id); commit(); } : null,
   });
   handleNewOption(sheet.querySelector('#e-cat'), 'categories', 'Название категории', { color: '#8e4ec6', income: false });
+  sheet.querySelector('#e-cat').addEventListener('change', () => { catTouched = true; });
+
+  const chipsEl = sheet.querySelector('#e-works'), addEl = sheet.querySelector('#e-addwork');
+  const renderWorks = () => {
+    chipsEl.innerHTML = selected.length ? selected.map(id => `<span class="wchip">${esc(app.db.works[id]?.name || '?')}<button type="button" data-rmwork="${esc(id)}" aria-label="Убрать">✕</button></span>`).join('')
+      : '<span class="hint" style="color:var(--muted);font-size:14px">не выбрано</span>';
+    const all = alive(app.db.works).filter(w => !selected.includes(w.id)).sort((a, b) => (b.remind - a.remind) || a.name.localeCompare(b.name, 'ru'));
+    addEl.innerHTML = '<option value="">＋ Добавить вид работ</option>'
+      + all.map(w => `<option value="${esc(w.id)}">${esc(w.name)}${w.remind && workLabel(w) ? ` · ${esc(workLabel(w))}` : ''}</option>`).join('')
+      + '<option value="__new">＋ Новый вид работ…</option>';
+  };
+  renderWorks();
+  chipsEl.addEventListener('click', ev => {
+    const id = ev.target.closest('[data-rmwork]')?.dataset.rmwork;
+    if (id) { selected.splice(selected.indexOf(id), 1); renderWorks(); }
+  });
+  addEl.addEventListener('change', () => {
+    let id = addEl.value;
+    if (!id) return;
+    if (id === '__new') {
+      const name = (prompt('Название вида работ, например «Замена масла в АКПП»') || '').trim();
+      if (!name) { addEl.value = ''; return; }
+      const cat = sheet.querySelector('#e-cat').value;
+      id = upsert(app.db, 'works', { id: uid('wrk'), name, categoryId: cat === '__new' ? null : cat, remind: false }).id;
+      saveDb(app.db);
+    }
+    selected.push(id);
+    const w = app.db.works[id];
+    const titleEl = sheet.querySelector('#e-title');
+    if (!titleEl.value.trim() && selected.length === 1) titleEl.value = w.name;
+    if (!catTouched && w.categoryId) sheet.querySelector('#e-cat').value = w.categoryId;
+    renderWorks();
+  });
+
   const recalc = () => {
     const p = parseNum(sheet.querySelector('#e-parts').value), w = parseNum(sheet.querySelector('#e-work').value);
     const tot = sheet.querySelector('#e-total');
@@ -550,6 +625,210 @@ function expenseForm(rec = null) {
   };
   sheet.querySelector('#e-parts').addEventListener('input', recalc);
   sheet.querySelector('#e-work').addEventListener('input', recalc);
+}
+
+// ---------------------------------------------------------------- события ТО
+const STATUS = {
+  overdue: { color: 'var(--danger)', label: 'Просрочено' },
+  soon: { color: 'var(--fuel)', label: 'Скоро' },
+  ok: { color: 'var(--accent)', label: 'В норме' },
+  unknown: { color: 'var(--muted)', label: 'Нет данных' },
+  done: { color: 'var(--muted)', label: 'Выполнено' },
+};
+
+function daysText(d) {
+  const n = Math.abs(d);
+  return `${nf(n)} ${plural(n, 'день', 'дня', 'дней')}`;
+}
+
+function eventLines(ev) {
+  const km = ev.dueKm != null ? `${nf(ev.dueKm)} км` : ev.estKm != null ? `≈ ${nf(ev.estKm)} км` : '';
+  const date = ev.dueDate ? fmtDate(ev.dueDate) : ev.estDate ? `≈ ${fmtDate(ev.estDate)}` : '';
+  const leftKm = ev.leftKm != null ? ev.leftKm : ev.estLeftKm;
+  const leftKmEst = ev.leftKm == null && ev.estLeftKm != null;
+  const leftDays = ev.leftDays != null ? ev.leftDays : ev.estDays;
+  const leftDaysEst = ev.leftDays == null && ev.estDays != null;
+  let overShown = false;
+  const chip = (val, text, est) => {
+    if (val == null) return '';
+    if (val >= 0) return `<span class="due">${est ? '≈ ' : ''}${text}</span>`;
+    const prefix = overShown ? '' : 'просрочено '; overShown = true;
+    return `<span class="due over">${prefix}${est ? '≈ ' : ''}${text}</span>`;
+  };
+  return {
+    target: [km, date].filter(Boolean).join(' · '),
+    left: [chip(leftKm, leftKm != null ? `${nf(Math.abs(leftKm))} км` : '', leftKmEst),
+      chip(leftDays, leftDays != null ? daysText(leftDays) : '', leftDaysEst)].filter(Boolean).join(''),
+  };
+}
+
+function eventRow(ev) {
+  const st = STATUS[ev.status];
+  const l = eventLines(ev);
+  const cat = app.db.categories[ev.work.categoryId];
+  return `<button class="row ev" data-event="${esc(ev.work.id)}">
+    <span class="ico" style="background:${st.color}">${esc(ev.work.name.trim().charAt(0).toUpperCase())}${ev.count ? `<b class="cnt">${ev.count}</b>` : ''}</span>
+    <span class="main">
+      <span class="title wrap">${esc(ev.work.name)}</span>
+      ${ev.status === 'done' ? `<span class="meta">выполнено ${fmtDate(ev.last.date)}${ev.last.odo ? ` на ${nf(ev.last.odo)} км` : ''}</span>`
+        : ev.status === 'unknown' ? `<span class="meta">${ev.neverDone ? 'ещё не выполнялось — отметьте первое выполнение' : 'нет пробега у последней записи'}</span>`
+        : `<span class="meta num">${l.target}</span><span class="left num">${l.left}</span>`}
+      ${ev.progress != null && ev.status !== 'done' ? `<span class="prog"><i style="width:${(ev.progress * 100).toFixed(0)}%;background:${st.color}"></i></span>` : ''}
+    </span>
+  </button>`;
+}
+
+function overviewEvents() {
+  const { events } = eventsData();
+  const top = events.filter(e => e.status === 'overdue' || e.status === 'soon').slice(0, 4);
+  const next = top.length ? top : events.filter(e => e.status === 'ok').slice(0, 2);
+  if (!next.length) return '';
+  return `<h2 class="section">${top.length ? 'Обслуживание: пора' : 'Ближайшее обслуживание'}</h2>
+    <div class="list">${next.map(eventRow).join('')}</div>
+    <button class="btn soft block" style="margin-top:10px" data-tab-go="events">Все события</button>`;
+}
+
+function viewEvents() {
+  const { v, events, rate } = eventsData();
+  if (!v) return welcome();
+  const active = events.filter(e => e.status !== 'done');
+  const done = events.filter(e => e.status === 'done');
+  const n = st => events.filter(e => e.status === st).length;
+  return `
+    <div class="actions" style="margin-top:0">
+      <button class="btn primary" data-act="add-event">＋ Событие</button>
+      <button class="btn" data-act="ics-all">В Календарь</button>
+    </div>
+    <div class="grid2">
+      ${tile('Просрочено', String(n('overdue')), '', n('overdue') ? 'нужно сделать' : 'всё в порядке')}
+      ${tile('Скоро', String(n('soon')), '', '30 дней или 1000 км')}
+    </div>
+    ${active.length ? `<h2 class="section">Плановое обслуживание</h2><div class="list">${active.map(eventRow).join('')}</div>`
+      : `<div class="empty">Событий пока нет.<br>Добавьте интервал, например «Замена масла — каждые 7 500 км или 1 год».</div>`}
+    ${done.length ? `<h2 class="section">Разовые, выполнены</h2><div class="list">${done.map(eventRow).join('')}</div>` : ''}
+    <p class="note">Срок считается от последнего расхода с этим видом работ. Добавили расход — событие продлилось само.
+      ${rate ? `Оценки «≈» — по среднему пробегу ${nf(rate)} км в день за последний год.` : ''}</p>`;
+}
+
+function eventSheet(workId) {
+  const { v, events } = eventsData();
+  const ev = events.find(e => e.work.id === workId);
+  const w = app.db.works[workId];
+  if (!w) return;
+  const l = ev ? eventLines(ev) : null;
+  const hist = ev ? [...ev.history].reverse() : [];
+  const sheet = openSheet(w.name, `
+    <div class="card pad">
+      <div class="label" style="color:var(--muted);font-size:13px">Интервал</div>
+      <div style="font-size:17px;font-weight:600;margin-top:2px">${esc(workLabel(w) || 'не задан')}</div>
+      ${ev && ev.status !== 'done' && ev.status !== 'unknown' ? `
+        <div class="label" style="color:var(--muted);font-size:13px;margin-top:12px">Следующий раз</div>
+        <div class="num" style="font-size:17px;font-weight:600;margin-top:2px">${l.target}</div>
+        <div class="left num" style="margin-top:6px">${l.left}</div>` : ''}
+      ${ev?.last ? `<div class="label" style="color:var(--muted);font-size:13px;margin-top:12px">Последний раз</div>
+        <div class="num">${fmtDate(ev.last.date)}${ev.last.odo ? ` · ${nf(ev.last.odo)} км` : ''} · ${money(ev.last.total)}</div>` : ''}
+    </div>
+    <div class="form-gap"></div>
+    <button class="btn primary block" data-evact="done">Отметить выполнение</button>
+    <div class="form-gap"></div>
+    <div class="actions" style="margin-top:0">
+      <button class="btn" data-evact="edit">Настроить</button>
+      <button class="btn" data-evact="ics" ${ev && (ev.dueDate || ev.estDate) && ev.status !== 'done' ? '' : 'disabled style="opacity:.4"'}>В Календарь</button>
+    </div>
+    ${hist.length ? `<h2 class="section">История · ${hist.length}</h2>
+      <div class="list">${hist.map(e => `<button class="row" data-edit="expense:${esc(e.id)}">
+        <span class="main"><span class="title num">${fmtDate(e.date)}${e.odo ? ` · ${nf(e.odo)} км${e.odoEstimated ? '≈' : ''}` : ''}</span>
+        <span class="meta">${esc(e.title)}</span></span><span class="end amount num">${money(e.total)}</span></button>`).join('')}</div>` : ''}`);
+  sheet.addEventListener('click', e => {
+    const a = e.target.closest('[data-evact]')?.dataset.evact;
+    if (a === 'done') { closeSheet(); expenseForm(null, { workIds: [w.id], title: w.name, categoryId: w.categoryId }); }
+    if (a === 'edit') { closeSheet(); workForm(w); }
+    if (a === 'ics' && ev) addToCalendar([ev], v);
+  });
+}
+
+function workForm(w = null, { pickExisting = false } = {}) {
+  const x = w || { name: '', categoryId: alive(app.db.categories).find(c => /основн|обслуж/i.test(c.name))?.id, everyKm: null, everyMonths: null, onceKm: null, onceDate: null, remind: true };
+  const candidates = alive(app.db.works).filter(k => !k.remind || !EV.hasSchedule(k)).sort((a, b) => a.name.localeCompare(b.name, 'ru'));
+  const sheet = openSheet(w ? 'Событие' : 'Новое событие', `
+    ${pickExisting && candidates.length ? `<div class="form">${field('Вид работ', `<select id="w-pick"><option value="">— новый —</option>${candidates.map(k => `<option value="${esc(k.id)}">${esc(k.name)}</option>`).join('')}</select>`)}</div>
+      <p class="form-hint">Выберите вид работ из истории, чтобы срок посчитался от последнего выполнения, или создайте новый.</p><div class="form-gap"></div>` : ''}
+    <div class="form">
+      <div class="field stack"><label>Название</label><input id="w-name" value="${esc(x.name)}" placeholder="Замена масла в двигателе" style="text-align:left"></div>
+      ${field('Категория', `<select id="w-cat">${optionList('categories', x.categoryId, '＋ Новая категория…')}</select>`)}
+    </div>
+    <div class="form-gap"></div>
+    <div class="form">
+      ${field('Каждые', numInput('w-km', x.everyKm, 'inputmode="numeric" placeholder="—"'), 'км')}
+      ${field('или каждые', numInput('w-mon', x.everyMonths, 'placeholder="—"'), 'мес')}
+    </div>
+    <p class="form-hint">Можно задать одно или оба условия — сработает то, что наступит раньше. Например, масло: 7 500 км или 12 мес.</p>
+    <div class="form-gap"></div>
+    <div class="form">
+      ${field('Разово при пробеге', numInput('w-okm', x.onceKm, 'inputmode="numeric" placeholder="—"'), 'км')}
+      ${field('Разово к дате', `<input id="w-odate" type="date" value="${esc(x.onceDate || '')}">`)}
+    </div>
+    <p class="form-hint">Для разовых задач (ТО-1, техосмотр к дате), если нет регулярного интервала.</p>
+    <div class="form-gap"></div>
+    <div class="form">${field('Напоминать', `<input id="w-remind" type="checkbox" ${x.remind ? 'checked' : ''}>`)}</div>`,
+  {
+    onSave() {
+      const pick = sheet.querySelector('#w-pick')?.value;
+      const base = pick ? app.db.works[pick] : w;
+      const name = sheet.querySelector('#w-name').value.trim();
+      if (!name) { toast('Укажите название'); return false; }
+      const everyKm = parseNum(sheet.querySelector('#w-km').value);
+      const everyMonths = parseNum(sheet.querySelector('#w-mon').value);
+      const onceKm = parseNum(sheet.querySelector('#w-okm').value);
+      const onceDate = sheet.querySelector('#w-odate').value || null;
+      const remind = sheet.querySelector('#w-remind').checked;
+      if (remind && !everyKm && !everyMonths && !onceKm && !onceDate) { toast('Задайте интервал по пробегу, времени или разовый срок'); return false; }
+      const cat = sheet.querySelector('#w-cat').value;
+      upsert(app.db, 'works', {
+        ...(base || {}), id: base?.id || uid('wrk'), name,
+        categoryId: cat === '__new' ? null : cat,
+        everyKm: everyKm ? Math.round(everyKm) : null, everyMonths: everyMonths || null,
+        onceKm: onceKm ? Math.round(onceKm) : null, onceDate, remind,
+      });
+      commit();
+      toast('Событие сохранено');
+    },
+    onDelete: w ? () => {
+      const used = alive(app.db.expenses).some(e => (e.workIds || []).includes(w.id));
+      if (used) { upsert(app.db, 'works', { ...w, remind: false }); toast('Напоминание выключено — вид работ остался в истории расходов'); }
+      else remove(app.db, 'works', w.id);
+      commit();
+    } : null,
+  });
+  handleNewOption(sheet.querySelector('#w-cat'), 'categories', 'Название категории', { color: '#46a758', income: false });
+  sheet.querySelector('#w-pick')?.addEventListener('change', ev => {
+    const k = app.db.works[ev.target.value];
+    if (!k) return;
+    sheet.querySelector('#w-name').value = k.name;
+    if (k.categoryId) sheet.querySelector('#w-cat').value = k.categoryId;
+    sheet.querySelector('#w-km').value = k.everyKm ? String(k.everyKm) : '';
+    sheet.querySelector('#w-mon').value = k.everyMonths ? String(k.everyMonths).replace('.', ',') : '';
+  });
+}
+
+function addToCalendar(list, v) {
+  const items = list.filter(ev => ev.status !== 'done' && (ev.dueDate || ev.estDate)).map(ev => {
+    const date = ev.dueDate || ev.estDate;
+    const l = eventLines(ev);
+    return {
+      uid: `${ev.work.id}-${date}`, date, title: ev.work.name,
+      description: `Срок: ${l.target.replace(/<[^>]+>/g, '')}. Интервал: ${workLabel(ev.work)}.${ev.estDate && !ev.dueDate ? ' Дата оценочная, по среднему пробегу.' : ''}`,
+    };
+  });
+  if (!items.length) { toast('Нет событий с датой'); return; }
+  const ics = EV.eventsToIcs(items, v?.name || 'Авто');
+  const blob = new Blob([ics], { type: 'text/calendar' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = items.length === 1 ? `${items[0].title}.ics` : 'Обслуживание.ics';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+  toast(items.length === 1 ? 'Откройте файл, чтобы добавить в Календарь' : `Событий в файле: ${items.length}`);
 }
 
 function vehicleSheet() {
@@ -577,11 +856,12 @@ async function importFile(file) {
   const recs = ceToRecords(text);
   const msg = `Car Expenses: ${recs.vehicles.map(v => v.name).join(', ')}\n${recs.refuels.length} заправок, ${recs.expenses.length} расходов.\n\nИмпортировать? Уже перенесённые записи не задвоятся.`;
   if (!confirm(msg)) return;
-  const added = importInto(app.db, recs);
+  const { added, updated } = importInto(app.db, recs);
   if (!app.settings.vehicleId && recs.vehicles[0]) { app.settings.vehicleId = recs.vehicles[0].id; saveSettings(app.settings); }
   app.tab = 'overview';
   commit();
-  toast(`Добавлено: ${added.refuels} заправок, ${added.expenses} расходов`);
+  const upd = updated.expenses + updated.refuels;
+  toast(`Добавлено: ${added.refuels} заправок, ${added.expenses} расходов, ${added.works} видов работ${upd ? `; обновлено записей: ${upd}` : ''}`);
 }
 
 async function shareOrDownload(name, text, mime) {
@@ -622,6 +902,11 @@ document.addEventListener('click', async e => {
     else expenseForm(app.db.expenses[id]);
     return;
   }
+  const evId = t.closest('[data-event]')?.dataset.event;
+  if (evId) { eventSheet(evId); return; }
+  const go = t.closest('[data-tab-go]')?.dataset.tabGo;
+  if (go) { app.tab = go; render(); window.scrollTo(0, 0); return; }
+  if (t.closest('#gearBtn')) { app.tab = 'more'; render(); window.scrollTo(0, 0); return; }
   const filter = t.closest('[data-filter]')?.dataset.filter;
   if (filter) { app.expFilter = filter; render(); return; }
   const period = t.closest('[data-period]')?.dataset.period;
@@ -643,6 +928,8 @@ document.addEventListener('click', async e => {
   switch (act) {
     case 'add-refuel': refuelForm(); break;
     case 'add-expense': expenseForm(); break;
+    case 'add-event': workForm(null, { pickExisting: true }); break;
+    case 'ics-all': { const { v, events } = eventsData(); addToCalendar(events, v); break; }
     case 'go-more': app.tab = 'more'; render(); break;
     case 'import': {
       if (app.tab !== 'more') { app.tab = 'more'; render(); }
