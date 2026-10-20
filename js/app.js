@@ -438,7 +438,8 @@ function openSheet(title, body, { onSave, onDelete, saveLabel = 'Готово' }
     <div class="sheet-head"><button class="cancel" data-sheet="close">Отмена</button><h3>${esc(title)}</h3>
       ${onSave ? `<button data-sheet="save">${saveLabel}</button>` : '<span style="width:56px"></span>'}</div>
     ${body}
-    ${onDelete ? '<div class="form-gap"></div><button class="btn danger block" data-sheet="delete">Удалить запись</button>' : ''}`;
+    ${onDelete ? '<div class="form-gap"></div><button class="btn danger block" data-sheet="delete">Удалить запись</button>' : ''}
+    ${onSave ? `<div class="sheet-foot"><button class="btn primary" data-sheet="save">${saveLabel === 'Готово' ? 'Сохранить' : esc(saveLabel)}</button></div>` : ''}`;
   back.hidden = false;
   document.body.style.overflow = 'hidden';
   sheet.onclick = e => {
