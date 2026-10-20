@@ -254,3 +254,25 @@ h2.section { font-size: 13px; font-weight: 600; text-transform: uppercase; lette
 .wchip { display: inline-flex; align-items: center; gap: 6px; padding: 5px 6px 5px 10px; border-radius: 8px; background: var(--accent-soft); color: var(--accent); font-size: 14px; font-weight: 550; }
 .wchip button { width: 20px; height: 20px; border-radius: 50%; font-size: 11px; color: var(--accent); background: color-mix(in srgb, var(--accent) 16%, transparent); }
 .field select.addwork { direction: ltr; text-align: left; color: var(--accent); padding: 8px 0 12px; }
+
+/* ---------- переключатель Обслуживание / Запчасти ---------- */
+.seg { display: grid; grid-template-columns: 1fr 1fr; padding: 3px; border-radius: 11px; background: var(--card-2); margin-bottom: 12px; box-shadow: inset 0 0 0 .5px var(--line); }
+.seg button { height: 34px; border-radius: 9px; font-size: 14.5px; font-weight: 550; color: var(--muted); }
+.seg button.active { background: var(--card); color: var(--text); box-shadow: 0 1px 3px rgba(0,0,0,.12); }
+
+/* ---------- отчёт ---------- */
+.report { position: fixed; inset: 0; z-index: 70; background: #fff; overflow-y: auto; -webkit-overflow-scrolling: touch; color-scheme: light; }
+.report[hidden] { display: none; }
+.report-bar { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: calc(env(safe-area-inset-top) + 10px) 16px 10px; background: rgba(247,247,250,.92); -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px);
+  border-bottom: .5px solid rgba(60,60,67,.18); color: #1c1c1e; font-weight: 600; }
+.report-bar button { color: #1f7a5c; font-weight: 600; padding: 4px 0; }
+body.report-open { overflow: hidden; }
+@media print {
+  body.report-open > *:not(#report) { display: none !important; }
+  body.report-open { overflow: visible; background: #fff; }
+  .report { position: static; overflow: visible; }
+  .report-bar { display: none; }
+  .rep { padding: 0; max-width: none; }
+  @page { margin: 14mm 12mm; }
+}

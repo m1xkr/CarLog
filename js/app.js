@@ -4,6 +4,8 @@ import * as S from './stats.js';
 import * as disk from './yadisk.js';
 import { createSync } from './sync.js';
 import * as EV from './events.js';
+import * as P from './parts.js';
+import { buildReport, REPORT_CSS } from './report.js';
 import { YANDEX_CLIENT_ID, APP_VERSION } from './config.js';
 
 // ---------------------------------------------------------------- форматирование
@@ -29,6 +31,7 @@ const app = {
   expFilter: 'all',
   expQuery: '',
   statsPeriod: '12m',
+  eventsSeg: 'service',
   syncState: 'off',
   render: () => render(),
   setSyncState: (state, msg) => { app.syncState = state; app.syncMsg = msg; renderSync(); },
@@ -55,7 +58,16 @@ function data() {
   const expenses = v ? alive(app.db.expenses).filter(e => e.vehicleId === v.id)
     .map(e => ({ ...e, income: !!cats[e.categoryId]?.income })) : [];
   const works = alive(app.db.works);
-  return { v, refuels, expenses, works };
+  const parts = v ? alive(app.db.parts).filter(p => p.vehicleId === v.id) : [];
+  return { v, refuels, expenses, works, parts };
+}
+function partsData() {
+  const { v, refuels, expenses, parts } = data();
+  const cur = EV.currentPosition([...refuels, ...expenses.filter(e => e.odo && !e.odoEstimated)]);
+  const list = parts.map(part => ({ part, usage: P.partUsage(part, cur, today()) }));
+  const rank = { installed: 0, new: 1, stored: 2, retired: 3 };
+  list.sort((a, b) => rank[a.usage.status] - rank[b.usage.status] || (b.usage.wear ?? -1) - (a.usage.wear ?? -1));
+  return { v, cur, list };
 }
 function eventsData() {
   const { v, refuels, expenses, works } = data();
@@ -72,7 +84,8 @@ function render() {
   const view = $('#view');
   const html = ({ overview: viewOverview, events: viewEvents, refuels: viewRefuels, expenses: viewExpenses, stats: viewStats, more: viewMore })[app.tab]();
   view.innerHTML = html;
-  const urgent = v ? eventsData().events.filter(e => e.status === 'overdue' || e.status === 'soon').length : 0;
+  const urgent = v ? eventsData().events.filter(e => e.status === 'overdue' || e.status === 'soon').length
+    + partsData().list.filter(x => x.usage.status === 'installed' && x.usage.wear >= 0.9).length : 0;
   const badge = $('#eventsBadge');
   badge.textContent = urgent; badge.hidden = !urgent;
   $('#gearBtn').classList.toggle('active', app.tab === 'more');
@@ -367,12 +380,13 @@ function viewMore() {
       <button class="set-row accent" data-act="import"><span>Импорт файла</span><span class="hint">Car Expenses или резервная копия</span></button>
       <button class="set-row" data-act="export-json"><span>Сохранить резервную копию</span><span class="go">›</span></button>
       <button class="set-row" data-act="export-csv"><span>Выгрузить таблицу (CSV)</span><span class="go">›</span></button>
+      <button class="set-row accent" data-act="report"><span>Отчёт по обслуживанию для продажи</span><span class="go">›</span></button>
     </div>
 
     <h2 class="section">Автомобиль</h2>
     <div class="list">
       ${vehicles().map(x => `<button class="set-row" data-vehicle="${esc(x.id)}"><span>${esc(x.name)}</span><span class="hint">${x.id === v?.id ? '✓ выбран' : 'выбрать'}</span></button>`).join('')}
-      ${v ? '<button class="set-row" data-act="rename-vehicle">Переименовать текущий</button>' : ''}
+      ${v ? '<button class="set-row" data-act="vehicle-details"><span>Данные автомобиля</span><span class="hint">марка, год, VIN</span></button>' : ''}
       <button class="set-row accent" data-act="new-vehicle">Добавить автомобиль</button>
     </div>
 
@@ -384,7 +398,9 @@ function viewMore() {
 
 // ---------------------------------------------------------------- нижний лист с формой
 function openSheet(title, body, { onSave, onDelete, saveLabel = 'Готово' } = {}) {
-  const sheet = $('#sheet'), back = $('#sheetBackdrop');
+  // свежий элемент на каждое открытие, чтобы не копились обработчики от прошлых листов
+  const old = $('#sheet'), sheet = old.cloneNode(false), back = $('#sheetBackdrop');
+  old.replaceWith(sheet);
   sheet.innerHTML = `<div class="grab"></div>
     <div class="sheet-head"><button class="cancel" data-sheet="close">Отмена</button><h3>${esc(title)}</h3>
       ${onSave ? `<button data-sheet="save">${saveLabel}</button>` : '<span style="width:56px"></span>'}</div>
@@ -688,13 +704,21 @@ function overviewEvents() {
     <button class="btn soft block" style="margin-top:10px" data-tab-go="events">Все события</button>`;
 }
 
+function segControl() {
+  return `<div class="seg">
+    <button class="${app.eventsSeg === 'service' ? 'active' : ''}" data-seg="service">Обслуживание</button>
+    <button class="${app.eventsSeg === 'parts' ? 'active' : ''}" data-seg="parts">Запчасти</button>
+  </div>`;
+}
+
 function viewEvents() {
   const { v, events, rate } = eventsData();
   if (!v) return welcome();
+  if (app.eventsSeg === 'parts') return segControl() + viewParts();
   const active = events.filter(e => e.status !== 'done');
   const done = events.filter(e => e.status === 'done');
   const n = st => events.filter(e => e.status === st).length;
-  return `
+  return `${segControl()}
     <div class="actions" style="margin-top:0">
       <button class="btn primary" data-act="add-event">＋ Событие</button>
       <button class="btn" data-act="ics-all">В Календарь</button>
@@ -811,6 +835,258 @@ function workForm(w = null, { pickExisting = false } = {}) {
   });
 }
 
+// ---------------------------------------------------------------- запчасти с ресурсом
+const wearColor = w => w == null ? 'var(--muted)' : w >= 1 ? 'var(--danger)' : w >= 0.85 ? 'var(--fuel)' : 'var(--accent)';
+const yearsText = months => months == null ? '—' : months >= 12 ? `${nf(months / 12, 1)} г.` : `${nf(months)} мес`;
+
+function resourceText(p, u) {
+  const parts = [];
+  if (p.resourceKm) parts.push(`${nf(u.km)} из ${nf(p.resourceKm)} км`);
+  else parts.push(`${nf(u.km)} км`);
+  if (p.resourceMonths) parts.push(`${yearsText(u.months)} из ${yearsText(p.resourceMonths)}`);
+  else if (u.months != null) parts.push(yearsText(u.months));
+  return parts.join(' · ');
+}
+
+function partRow({ part: p, usage: u }) {
+  const color = u.status === 'retired' ? 'var(--muted)' : wearColor(u.wear);
+  return `<button class="row ev" data-part="${esc(p.id)}">
+    <span class="ico" style="background:${color}">${esc(p.name.trim().charAt(0).toUpperCase())}</span>
+    <span class="main">
+      <span class="title wrap">${esc(p.name)}</span>
+      <span class="meta">${esc([P.STATUS_LABEL[u.status], p.note].filter(Boolean).join(' · '))}</span>
+      <span class="left num"><span class="due ${u.wear >= 1 && u.status !== 'retired' ? 'over' : ''}">${resourceText(p, u)}</span>${u.wear != null ? `<span class="due">износ ${nf(u.wear * 100)}%</span>` : ''}</span>
+      ${u.wear != null && u.status !== 'retired' ? `<span class="prog"><i style="width:${Math.min(100, u.wear * 100).toFixed(0)}%;background:${color}"></i></span>` : ''}
+    </span>
+  </button>`;
+}
+
+function viewParts() {
+  const { list } = partsData();
+  const active = list.filter(x => x.usage.status !== 'retired');
+  const retired = list.filter(x => x.usage.status === 'retired');
+  return `
+    <div class="actions" style="margin-top:0"><button class="btn primary" data-act="add-part" style="grid-column:1/-1">＋ Запчасть</button></div>
+    ${active.length ? `<h2 class="section">В работе и на хранении</h2><div class="list">${active.map(partRow).join('')}</div>`
+      : '<div class="empty">Запчастей пока нет.<br>Добавьте шины, аккумулятор, колодки — приложение посчитает износ по пробегу и сроку службы.</div>'}
+    ${retired.length ? `<h2 class="section">Списаны</h2><div class="list">${retired.map(partRow).join('')}</div>` : ''}
+    <p class="note">Пробег копится только пока деталь установлена — удобно для сезонных комплектов шин. Износ — наибольшая из двух долей: по пробегу и по сроку.</p>`;
+}
+
+function partForm(p = null) {
+  const { v, refuels, expenses } = data();
+  if (!v) return toast('Сначала добавьте автомобиль');
+  const odo = S.lastOdo(refuels, expenses);
+  const x = p || { name: '', note: '', resourceKm: null, resourceMonths: null, buyDate: today(), price: null };
+  const sheet = openSheet(p ? 'Запчасть' : 'Новая запчасть', `
+    <div class="form">
+      <div class="field stack"><label>Название</label><input id="p-name" value="${esc(x.name)}" placeholder="Зимние шины, аккумулятор…" style="text-align:left"></div>
+      <div class="field stack"><label>Марка, модель, артикул</label><input id="p-note" value="${esc(x.note || '')}" placeholder="Nokian Hakkapeliitta 9, 205/55 R16" style="text-align:left"></div>
+    </div>
+    <div class="form-gap"></div>
+    <div class="form">
+      ${field('Ресурс', numInput('p-rkm', x.resourceKm, 'inputmode="numeric" placeholder="—"'), 'км')}
+      ${field('Срок службы', numInput('p-ry', x.resourceMonths ? x.resourceMonths / 12 : null, 'placeholder="—"'), 'лет')}
+    </div>
+    <p class="form-hint">Задайте пробег, срок или оба — износ считается по тому, что ближе к пределу.</p>
+    <div class="form-gap"></div>
+    <div class="form">
+      ${field('Куплена', `<input id="p-buy" type="date" value="${esc(x.buyDate || '')}">`)}
+      ${field('Цена', numInput('p-price', x.price, 'placeholder="—"'), '₽')}
+      ${p ? '' : field('Записать в расходы', '<input id="p-exp" type="checkbox" checked>')}
+    </div>
+    ${p ? '' : `<div class="form-gap"></div>
+    <div class="form">
+      ${field('Установить сейчас', '<input id="p-inst" type="checkbox" checked>')}
+      ${field('Пробег установки', numInput('p-iodo', odo, 'inputmode="numeric"'), 'км')}
+    </div>`}`,
+  {
+    onSave() {
+      const name = sheet.querySelector('#p-name').value.trim();
+      if (!name) { toast('Укажите название'); return false; }
+      const rkm = parseNum(sheet.querySelector('#p-rkm').value);
+      const ry = parseNum(sheet.querySelector('#p-ry').value);
+      const price = parseNum(sheet.querySelector('#p-price').value);
+      const buyDate = sheet.querySelector('#p-buy').value || null;
+      const rec = {
+        ...(p || {}), id: p?.id || uid('prt'), vehicleId: p?.vehicleId || v.id, name,
+        note: sheet.querySelector('#p-note').value.trim(),
+        resourceKm: rkm ? Math.round(rkm) : null, resourceMonths: ry ? Math.round(ry * 12 * 10) / 10 : null,
+        buyDate, price, installs: p?.installs || [],
+      };
+      if (!p && sheet.querySelector('#p-inst').checked) {
+        const iodo = parseNum(sheet.querySelector('#p-iodo').value);
+        rec.installs = [{ onDate: today(), onOdo: iodo ? Math.round(iodo) : null }];
+      }
+      upsert(app.db, 'parts', rec);
+      if (!p && price && sheet.querySelector('#p-exp').checked) {
+        const cat = alive(app.db.categories).find(c => /основн|запчаст|обслуж/i.test(c.name));
+        upsert(app.db, 'expenses', { id: uid('exp'), vehicleId: v.id, title: `${name}${rec.note ? ' (' + rec.note + ')' : ''}`, categoryId: cat?.id || null,
+          date: buyDate || today(), odo: rec.installs[0]?.onOdo || odo || null, total: price, parts: price, work: 0, note: 'покупка запчасти', workIds: [] });
+      }
+      commit();
+      toast('Запчасть сохранена');
+    },
+    onDelete: p ? () => { remove(app.db, 'parts', p.id); commit(); } : null,
+  });
+}
+
+function partSheet(id, mode = null) {
+  const { v, cur, list } = partsData();
+  const item = list.find(x => x.part.id === id);
+  if (!item) return;
+  const { part: p, usage: u } = item;
+  const odo = cur?.odo ?? null;
+  const installs = [...(p.installs || [])].reverse();
+  const action = mode === 'on' ? 'Установка' : mode === 'off' ? 'Снятие' : mode === 'retire' ? 'Списание' : null;
+  const sheet = openSheet(p.name, `
+    <div class="card pad">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px">
+        <span style="font-size:17px;font-weight:600">${u.wear != null ? `Износ ${nf(u.wear * 100)}%` : 'Ресурс не задан'}</span>
+        <span class="hint" style="color:var(--muted);font-size:13px">${P.STATUS_LABEL[u.status]}</span>
+      </div>
+      ${u.wear != null ? `<span class="prog" style="height:6px"><i style="width:${Math.min(100, u.wear * 100).toFixed(0)}%;background:${wearColor(u.wear)}"></i></span>` : ''}
+      <div class="left num" style="margin-top:10px"><span class="due">${resourceText(p, u)}</span>
+        ${u.leftKm != null && u.status !== 'retired' ? `<span class="due ${u.leftKm < 0 ? 'over' : ''}">${u.leftKm < 0 ? 'перепробег' : 'осталось'} ${nf(Math.abs(u.leftKm))} км</span>` : ''}</div>
+      ${p.note ? `<div class="note" style="margin:10px 0 0">${esc(p.note)}</div>` : ''}
+      ${p.buyDate || p.price ? `<div class="note" style="margin:4px 0 0">Куплена ${p.buyDate ? fmtDate(p.buyDate) : ''}${p.price ? ` · ${money(p.price)}` : ''}</div>` : ''}
+    </div>
+    <div class="form-gap"></div>
+    ${action ? `
+      <h2 class="section" style="margin-top:4px">${action}</h2>
+      <div class="form">
+        ${field('Дата', `<input id="pa-date" type="date" value="${today()}">`)}
+        ${mode !== 'retire' ? field('Пробег', numInput('pa-odo', odo, 'inputmode="numeric"'), 'км') : ''}
+      </div>
+      <div class="form-gap"></div>
+      <div class="actions" style="margin-top:0"><button class="btn" data-pact="cancel">Отмена</button><button class="btn primary" data-pact="confirm">Сохранить</button></div>`
+    : `<div class="actions" style="margin-top:0">
+        ${u.status === 'installed' ? '<button class="btn" data-pact="off">Снять</button>'
+          : u.status === 'retired' ? '<button class="btn" data-pact="unretire">Вернуть</button>'
+          : '<button class="btn primary" data-pact="on">Установить</button>'}
+        <button class="btn" data-pact="edit">Изменить</button>
+      </div>
+      ${u.status !== 'retired' ? '<div class="form-gap"></div><button class="btn danger block" data-pact="retire">Списать</button>' : ''}`}
+    ${installs.length ? `<h2 class="section">История установки</h2><div class="list">${installs.map(it => `
+      <div class="row"><span class="main"><span class="title num">${fmtDate(it.onDate)}${it.offDate ? ` — ${fmtDate(it.offDate)}` : ' — сейчас'}</span>
+      <span class="meta num">${it.onOdo != null ? nf(it.onOdo) : '?'} → ${it.offOdo != null ? nf(it.offOdo) : it.offDate ? '?' : nf(odo)} км</span></span>
+      <span class="end num">${it.onOdo != null ? nf(Math.max(0, (it.offOdo ?? odo ?? it.onOdo) - it.onOdo)) + ' км' : ''}</span></div>`).join('')}</div>` : ''}`);
+  sheet.addEventListener('click', e => {
+    const a = e.target.closest('[data-pact]')?.dataset.pact;
+    if (!a) return;
+    if (a === 'edit') { closeSheet(); partForm(p); return; }
+    if (a === 'cancel') { partSheet(id); return; }
+    if (a === 'on' || a === 'off' || a === 'retire') { partSheet(id, a); return; }
+    if (a === 'unretire') { upsert(app.db, 'parts', { ...p, retiredDate: null }); commit(); partSheet(id); return; }
+    if (a === 'confirm') {
+      const date = sheet.querySelector('#pa-date').value || today();
+      const o = parseNum(sheet.querySelector('#pa-odo')?.value);
+      const ins = [...(p.installs || [])];
+      if (mode === 'on') ins.push({ onDate: date, onOdo: o != null ? Math.round(o) : null });
+      if (mode === 'off' && ins.length) ins[ins.length - 1] = { ...ins[ins.length - 1], offDate: date, offOdo: o != null ? Math.round(o) : null };
+      const patch = { ...p, installs: ins };
+      if (mode === 'retire') {
+        patch.retiredDate = date;
+        const last = ins[ins.length - 1];
+        if (last && !last.offDate) ins[ins.length - 1] = { ...last, offDate: date, offOdo: odo };
+      }
+      upsert(app.db, 'parts', patch);
+      commit();
+      toast(mode === 'on' ? 'Установлена' : mode === 'off' ? 'Снята' : 'Списана');
+      partSheet(id);
+    }
+  });
+}
+
+// ---------------------------------------------------------------- данные машины и отчёт для продажи
+function vehicleDetailsForm() {
+  const v = currentVehicle();
+  if (!v) return;
+  const sheet = openSheet('Данные автомобиля', `
+    <div class="form">
+      <div class="field stack"><label>Название в приложении</label><input id="vd-name" value="${esc(v.name)}" style="text-align:left"></div>
+      ${field('Марка', `<input id="vd-make" value="${esc(v.make || '')}" placeholder="Skoda">`)}
+      ${field('Модель', `<input id="vd-model" value="${esc(v.model || '')}" placeholder="Rapid">`)}
+      ${field('Год выпуска', `<input id="vd-year" inputmode="numeric" value="${esc(v.year || '')}" placeholder="2017">`)}
+      ${field('VIN', `<input id="vd-vin" value="${esc(v.vin || '')}" autocapitalize="characters" spellcheck="false" placeholder="17 символов">`)}
+      ${field('Госномер', `<input id="vd-plate" value="${esc(v.plate || '')}" autocapitalize="characters" placeholder="А123ВС 777">`)}
+    </div>
+    <p class="form-hint">Эти данные попадут в отчёт по обслуживанию.</p>`,
+  {
+    onSave() {
+      const name = sheet.querySelector('#vd-name').value.trim() || v.name;
+      upsert(app.db, 'vehicles', { ...v, name,
+        make: sheet.querySelector('#vd-make').value.trim(), model: sheet.querySelector('#vd-model').value.trim(),
+        year: sheet.querySelector('#vd-year').value.trim(), vin: sheet.querySelector('#vd-vin').value.trim().toUpperCase(),
+        plate: sheet.querySelector('#vd-plate').value.trim().toUpperCase() });
+      commit();
+      toast('Сохранено');
+    },
+  });
+}
+
+const DEFAULT_REPORT_CAT = /основн|незаплан|обслуж|ремонт|запчаст|тюнинг|аксесс/i;
+
+function reportSetup() {
+  const { v, expenses } = data();
+  if (!v) return toast('Сначала добавьте автомобиль');
+  const used = new Map();
+  for (const e of expenses) if (!e.income) used.set(e.categoryId || '_none', (used.get(e.categoryId || '_none') || 0) + 1);
+  const cats = [...used.entries()].map(([id, n]) => ({ id, n, name: app.db.categories[id]?.name || 'Без категории' }))
+    .sort((a, b) => a.name.localeCompare(b.name, 'ru'));
+  const sheet = openSheet('Отчёт для продажи', `
+    <p class="form-hint" style="margin-top:0">История обслуживания для покупателя: регламентные работы, запчасти и хронология ремонтов. Откроется документ, который можно сохранить в PDF или отправить.</p>
+    <div class="form-gap"></div>
+    ${!v.vin || !v.make ? `<button class="btn soft block" data-rep="details">Добавить марку, год и VIN</button><div class="form-gap"></div>` : ''}
+    <h2 class="section" style="margin-top:0">Что включить в хронологию</h2>
+    <div class="form">${cats.map(c => field(`${esc(c.name)} <span style="color:var(--muted);font-size:13px">· ${c.n}</span>`,
+      `<input type="checkbox" data-repcat="${esc(c.id)}" ${DEFAULT_REPORT_CAT.test(c.name) ? 'checked' : ''}>`)).join('')}</div>
+    <div class="form-gap"></div>
+    <div class="form">${field('Показывать суммы', '<input id="rep-costs" type="checkbox">')}</div>
+    <p class="form-hint">Покупателю обычно важны даты и пробег, а не цены — по умолчанию суммы скрыты.</p>`,
+  {
+    saveLabel: 'Создать',
+    onSave() {
+      const include = new Set([...sheet.querySelectorAll('[data-repcat]')].filter(i => i.checked).map(i => i.dataset.repcat));
+      showReport({ include, showCosts: sheet.querySelector('#rep-costs').checked });
+    },
+  });
+  sheet.addEventListener('click', e => {
+    if (e.target.closest('[data-rep="details"]')) { closeSheet(); vehicleDetailsForm(); }
+  });
+}
+
+function reportHtml(opts) {
+  const { v, refuels, expenses } = data();
+  const { events } = eventsData();
+  const { list } = partsData();
+  return buildReport({ vehicle: v, expenses, refuels, events, parts: list, categories: app.db.categories,
+    include: opts.include, showCosts: opts.showCosts, summary: S.summary(refuels, expenses), todayIso: today() });
+}
+
+function showReport(opts) {
+  const v = currentVehicle();
+  const html = reportHtml(opts);
+  const box = $('#report');
+  box.innerHTML = `<div class="report-bar">
+      <button data-repbar="close">Закрыть</button>
+      <span>Отчёт</span>
+      <span style="display:flex;gap:14px"><button data-repbar="share">Отправить</button><button data-repbar="print">PDF</button></span>
+    </div><style>${REPORT_CSS}</style>${html}`;
+  box.hidden = false;
+  document.body.classList.add('report-open');
+  box.scrollTop = 0;
+  box.onclick = e => {
+    const a = e.target.closest('[data-repbar]')?.dataset.repbar;
+    if (a === 'close') { box.hidden = true; box.innerHTML = ''; document.body.classList.remove('report-open'); }
+    if (a === 'print') window.print();
+    if (a === 'share') {
+      const doc = `<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>История обслуживания — ${esc(v.name)}</title><style>body{margin:0;background:#fff}${REPORT_CSS}</style></head><body>${html}</body></html>`;
+      shareOrDownload(`История_обслуживания_${v.name}_${today()}.html`, doc, 'text/html');
+    }
+  };
+}
+
 function addToCalendar(list, v) {
   const items = list.filter(ev => ev.status !== 'done' && (ev.dueDate || ev.estDate)).map(ev => {
     const date = ev.dueDate || ev.estDate;
@@ -902,6 +1178,10 @@ document.addEventListener('click', async e => {
     else expenseForm(app.db.expenses[id]);
     return;
   }
+  const seg = t.closest('[data-seg]')?.dataset.seg;
+  if (seg) { app.eventsSeg = seg; render(); return; }
+  const partId = t.closest('[data-part]')?.dataset.part;
+  if (partId) { partSheet(partId); return; }
   const evId = t.closest('[data-event]')?.dataset.event;
   if (evId) { eventSheet(evId); return; }
   const go = t.closest('[data-tab-go]')?.dataset.tabGo;
@@ -929,6 +1209,9 @@ document.addEventListener('click', async e => {
     case 'add-refuel': refuelForm(); break;
     case 'add-expense': expenseForm(); break;
     case 'add-event': workForm(null, { pickExisting: true }); break;
+    case 'add-part': partForm(); break;
+    case 'report': reportSetup(); break;
+    case 'vehicle-details': vehicleDetailsForm(); break;
     case 'ics-all': { const { v, events } = eventsData(); addToCalendar(events, v); break; }
     case 'go-more': app.tab = 'more'; render(); break;
     case 'import': {
